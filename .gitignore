@@ -1,0 +1,43 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Vela specific ignores
+.env
+hello/
+.kiro/
+.stitch/
+.venv/
+medisense/medisense-ai/.venv/
+medisense/hello2.html
+medisense/*.pdf
+*.mp3
+vela_backend.log
+github.copilot*.vsix
+/blockchain.pdf
+/latest(cv).pdf
+
+# Local tooling / data
+.claude/
+*.db

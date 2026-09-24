@@ -1,0 +1,584 @@
+@import "tailwindcss";
+@import 'mapbox-gl/dist/mapbox-gl.css';
+
+@theme {
+  --color-surface-container-highest: #e2e2e2;
+  --color-primary-container: #1c1c1a;
+  --color-on-primary-fixed-variant: #474745;
+  --color-on-error: #ffffff;
+  --color-on-primary-fixed: #1c1c1a;
+  --color-on-error-container: #93000a;
+  --color-on-surface-variant: #464742;
+  --color-on-surface: #1a1c1c;
+  --color-on-primary-container: #858382;
+  --color-secondary: #695d44;
+  --color-secondary-fixed-dim: #d5c5a6;
+  --color-inverse-surface: #2f3131;
+  --color-surface-bright: #f9f9f9;
+  --color-outline: #777771;
+  --color-on-background: #1a1c1c;
+  --color-surface-tint: #5f5e5d;
+  --color-on-secondary-fixed: #231a07;
+  --color-surface-variant: #e2e2e2;
+  --color-inverse-on-surface: #f1f1f1;
+  --color-secondary-fixed: #f2e1c1;
+  --color-primary: #000000;
+  --color-on-primary: #ffffff;
+  --color-inverse-primary: #c9c6c4;
+  --color-on-secondary: #ffffff;
+  --color-surface-container-high: #e8e8e8;
+  --color-surface: #f9f9f9;
+  --color-primary-fixed-dim: #c9c6c4;
+  --color-surface-container: #eeeeee;
+  --color-on-tertiary: #ffffff;
+  --color-on-tertiary-fixed-variant: #4b463b;
+  --color-tertiary: #000000;
+  --color-tertiary-container: #1e1b12;
+  --color-secondary-container: #f2e1c1;
+  --color-error-container: #ffdad6;
+  --color-tertiary-fixed-dim: #cdc6b6;
+  --color-error: #ba1a1a;
+  --color-on-secondary-fixed-variant: #51452e;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low: #f3f3f3;
+  --color-on-tertiary-fixed: #1e1b12;
+  --color-on-secondary-container: #6f634a;
+  --color-surface-dim: #dadada;
+  --color-background: #f9f9f9;
+  --color-primary-fixed: #e5e2e0;
+  --color-outline-variant: #c7c7bf;
+  --color-tertiary-fixed: #e9e2d2;
+  --color-on-tertiary-container: #898376;
+
+  /* ── VELA semantic palette ──────────────────────────────────────
+     The :root block further down is the source of truth for these
+     values; mirroring them into @theme is what makes them reachable
+     as utilities (bg-brand, text-ink-3, border-line…). Pages built on
+     these names inherit the design system instead of hard-coding a
+     Tailwind grey that happens to look close. */
+
+  /* Brand — confident medical blue */
+  --color-night:       #1D1D1F;
+  --color-brand-tint:  #E8F2FD;
+  --color-brand-soft:  #BBD8F7;
+  --color-brand-light: #2997FF;
+  --color-brand:       #0071E3;
+  --color-brand-dark:  #0058B0;
+
+  /* Ink — deep slate-blue, never pure black */
+  --color-ink:    #1D1D1F;
+  --color-ink-2:  #515154;
+  --color-ink-3:  #6E6E73;
+
+  /* Surfaces & rules */
+  --color-canvas:     #F5F5F7;
+  --color-surface:    #FFFFFF;
+  --color-surface-2:  #EBEBF0;
+  --color-line-soft:  #F0F0F3;
+  --color-line:       #E5E5EA;
+  --color-line-strong:#D2D2D7;
+
+  /* Semantic — softened, never harsh */
+  --color-danger-tint: #FFEBEE;
+  --color-danger-soft: #FFC9CE;
+  --color-danger:      #D70015;
+  --color-warning-tint:#FFF4E0;
+  --color-warning-soft:#F2D9A6;
+  --color-warning:     #B25E00;
+  --color-success-tint:#E6F6EA;
+  --color-success-soft:#B9E3C4;
+  --color-success:     #248A3D;
+}
+
+.noise-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  opacity: 0.025;
+  z-index: 99990;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 128px 128px;
+}
+
+.material-symbols-outlined {
+  font-variation-settings: "FILL" 0, "wght" 200, "GRAD" 0, "opsz" 24
+}
+
+.orb-glow {
+  background: radial-gradient(circle, rgba(37, 99, 235, 0.1) 0%, rgba(12, 12, 11, 0) 70%)
+}
+
+.instrument-italic {
+  font-family: "Instrument Serif", serif;
+  font-style: italic
+}
+
+.glass-orb {
+  background: radial-gradient(circle at 30% 30%, rgba(37, 99, 235, 0.2) 0%, rgba(12, 12, 11, 0) 70%);
+  box-shadow: inset 0 0 40px rgba(0, 0, 0, 0.05)
+}
+/* ══════════════════════════════════════════════════════════════════
+   VELA — professional clinical design system
+   Bright, whitish, trustworthy. Medical blue + healing teal.
+   No pure black, no neon. Tuned to reassure clinicians.
+   ══════════════════════════════════════════════════════════════════ */
+:root {
+  /* Backgrounds — soft cool whites */
+  --bg:           #F5F5F7;   /* app canvas */
+  --bg-secondary: #EBEBF0;
+  --bg-tertiary:  #E5E5EA;
+  --bg-dark:      #FFFFFF;
+  --bg-card:      #FFFFFF;
+
+  /* Brand — confident medical blue */
+  --brand:        #0071E3;
+  --brand-dark:   #0058B0;
+  --brand-light:  #2997FF;
+  --brand-tint:   #E8F2FD;   /* very light blue wash */
+
+  /* Accent — healing teal (vitals / health) */
+  --accent:       #0A8A8F;
+  --accent-light: #3DB9BD;
+  --accent-tint:  #E3F5F5;
+
+  /* Semantic — softened, never harsh */
+  --danger:       #D70015;
+  --danger-light: #FFEBEE;
+  --danger-border:#FFC9CE;
+  --warning:      #B25E00;
+  --warning-light:#FFF4E0;
+  --success:      #248A3D;
+  --success-light:#E6F6EA;
+
+  /* Text — deep slate-blue, not black */
+  --text:         #1D1D1F;
+  --text-secondary:#515154;
+  --text-tertiary: #6E6E73;
+  --text-inverse:  #FFFFFF;
+
+  /* Borders */
+  --border:       #E5E5EA;
+  --border-strong:#D2D2D7;
+  --border-dark:  rgba(0,0,0,0.08);
+
+  /* Scrollbar */
+  --scrollbar-color: #C7C7CC;
+
+  /* Elevation */
+  --shadow-sm:  0 1px 2px rgba(0,0,0,0.04);
+  --shadow-md:  0 4px 24px rgba(0,0,0,0.06);
+  --shadow-lg:  0 12px 40px rgba(0,0,0,0.10);
+
+  /* Legacy compatibility (kept so existing class/inline refs stay valid) */
+  --bg-section:   #EBEBF0;
+  --blue:         #0071E3;
+  --blue-light:   #2997FF;
+  --blue-muted:   #E8F2FD;
+  --blue-glow:    rgba(0, 113, 227, 0.12);
+  --red:          #D70015;
+  --red-light:    #FFEBEE;
+  --amber:        #B25E00;
+  --green:        #248A3D;
+  --text-muted:   #6E6E73;
+  --white:        #FFFFFF;
+  --med-blue:     #0071E3;
+  --cream:        #1D1D1F;
+
+  /* Formerly the DARK page theme (PatientDetail, PatientDashboard, Doctor,
+     Receptionist, etc.) — now remapped to the bright clinical palette so
+     every page that consumes these variables becomes light automatically. */
+  --bg-color:       #F5F5F7;
+  --surface-color:  #FFFFFF;
+  --primary-color:  #0071E3;
+  --text-primary:   #1D1D1F;
+  --text-secondary: #515154;
+  --text-tertiary:  #6E6E73;
+  --border-color:   #E5E5EA;
+  --success-color:  #248A3D;
+  --error-color:    #D70015;
+  --warning-color:  #B25E00;
+  --accent-color:   #0A8A8F;
+  --surface-hover:  #F0F0F5;
+  --border-color-dark: #D2D2D7;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-weight: 400;
+  letter-spacing: -0.006em;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4 {
+  font-family: 'Inter', -apple-system, sans-serif;
+  letter-spacing: -0.02em;
+}
+
+/* Professional editorial serif (medical-journal feel) — replaces the quirky
+   italic display face. Non-italic by default so headings read trustworthy. */
+.font-serif {
+  font-family: 'Source Serif 4', Georgia, serif;
+  font-optical-sizing: auto;
+  font-style: normal;
+  letter-spacing: -0.01em;
+}
+.font-serif.italic, .italic.font-serif { font-style: italic; }
+
+.font-mono {
+  font-family: 'Geist Mono', monospace;
+}
+
+/* Legacy class support — these once pointed at Fraunces / Instrument Serif /
+   Geist, none of which were ever loaded, so they silently fell back to system
+   faces and made the type look accidental. They now resolve to the three real
+   families so old markup inherits the system instead of fighting it. */
+.font-bebas   { font-family: 'Source Serif 4', Georgia, serif; }
+.font-jetbrains { font-family: 'Geist Mono', monospace; }
+.font-outfit  { font-family: 'Inter', -apple-system, sans-serif; }
+
+/* ── EDITORIAL TYPE SCALE ──────────────────────────────────────────
+   The display face carries the brand voice: large, light, tight-tracked,
+   italic reserved for emphasis. Micro-labels are mono and letterspaced —
+   the pairing is what makes the UI read as designed rather than assembled. */
+.display {
+  font-family: 'Source Serif 4', Georgia, serif;
+  font-weight: 300;
+  letter-spacing: -0.025em;
+  line-height: 1.02;
+  font-optical-sizing: auto;
+}
+.display-italic { font-style: italic; }
+
+.label-mono {
+  font-family: 'Geist Mono', monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--text-tertiary);
+}
+
+/* Hairline rule used to separate editorial blocks. */
+.rule { border-top: 1px solid var(--border); }
+
+/* Custom Cursor */
+.cursor-dot {
+  width: 5px;
+  height: 5px;
+  background: var(--text);
+  border-radius: 50%;
+  position: fixed;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 99999;
+  transition: transform 0.1s ease, width 0.2s ease, height 0.2s ease, opacity 0.2s ease;
+}
+
+.cursor-ring {
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--text);
+  border-radius: 50%;
+  position: fixed;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  z-index: 99998;
+  opacity: 0.5;
+}
+
+.cursor-dot.hover {
+  transform: scale(3);
+  opacity: 0.3;
+}
+
+.cursor-ring.hover {
+  transform: scale(1.5);
+  opacity: 0.2;
+}
+
+.cursor-dot.click {
+  transform: scale(0.5);
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 3px;
+  height: 3px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar-color, #1A1A1A);
+  border-radius: 2px;
+  opacity: 0.3;
+}
+::-webkit-scrollbar-thumb:hover {
+  opacity: 0.6;
+}
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-color, #1A1A1A) transparent;
+}
+
+/* Animations */
+@keyframes fadeUp {
+  0% { transform: translateY(30px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+
+@keyframes reverse-spin {
+  from { transform: rotate(360deg); }
+  to { transform: rotate(0deg); }
+}
+
+.animate-reverse-spin {
+  animation: reverse-spin 1s linear infinite;
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(1); opacity: 0.3; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+@keyframes breathe {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.04); }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes pulse-glow {
+  0% { box-shadow: 0 0 0 0 rgba(26,26,26,0.2); }
+  70% { box-shadow: 0 0 0 8px rgba(26,26,26,0); }
+  100% { box-shadow: 0 0 0 0 rgba(26,26,26,0); }
+}
+
+/* Scroll Reveal */
+.reveal {
+  opacity: 0;
+  transform: translateY(32px);
+  transition: opacity 0.7s ease, transform 0.7s ease;
+}
+
+.reveal.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.animate-pulse-custom {
+  animation: pulse-dot 1.5s infinite;
+}
+
+.animate-breathe {
+  animation: breathe 3s infinite ease-in-out;
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite;
+}
+
+/* Symptom input placeholder */
+.symptom-input::placeholder {
+  color: #9CA3AF;
+  opacity: 1;
+}
+
+/* Photo Slots */
+.photo-slot {
+  background: #2563EB;
+  border-radius: 12px;
+  position: relative;
+  overflow: hidden;
+}
+
+
+/* ── VELA landing redesign utilities ─────────────────────────── */
+.font-display {
+  font-family: 'Inter', -apple-system, sans-serif;
+  font-weight: 700;
+  letter-spacing: -0.035em;
+}
+
+/* Light frosted card for bright layouts */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px solid var(--border);
+  backdrop-filter: blur(16px) saturate(1.1);
+  -webkit-backdrop-filter: blur(16px) saturate(1.1);
+  box-shadow: var(--shadow-md);
+}
+
+.text-gradient-brand {
+  background: linear-gradient(120deg, var(--brand) 0%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+/* keep the old name working, remapped to brand tones */
+.text-gradient-gold {
+  background: linear-gradient(120deg, var(--brand) 0%, var(--accent) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+.tilt-card {
+  transform-style: preserve-3d;
+  transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.35s ease;
+  will-change: transform;
+}
+.tilt-card > .tilt-inner { transform: translateZ(28px); }
+.tilt-glare {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(600px circle at var(--glare-x, 50%) var(--glare-y, 50%), rgba(0,113,227,0.06), transparent 45%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+.tilt-card:hover .tilt-glare { opacity: 1; }
+
+@keyframes ticker-scroll {
+  from { transform: translateX(0); }
+  to   { transform: translateX(-50%); }
+}
+.vitals-ticker { animation: ticker-scroll 36s linear infinite; }
+.vitals-ticker:hover { animation-play-state: paused; }
+
+@keyframes ecg-dash {
+  from { stroke-dashoffset: 480; }
+  to   { stroke-dashoffset: 0; }
+}
+.ecg-line {
+  stroke-dasharray: 480;
+  animation: ecg-dash 3.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vitals-ticker, .ecg-line { animation: none; }
+  .tilt-card { transition: none; }
+}
+
+
+/* ══════════════════════════════════════════════════════════════════
+   Apple HIG layer — clean iOS/macOS light.
+   Kept UNLAYERED on purpose: it out-ranks Tailwind's layered utilities, so
+   every page inherits the system without rewriting each class. References:
+   typography.md (system font, hierarchy, ≥ 11pt), color.md (system colours,
+   4.5:1 contrast), accessibility.md (focus + reduced motion), layout.md.
+   ══════════════════════════════════════════════════════════════════ */
+:root {
+  --font-sans: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-display: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter", "Helvetica Neue", Arial, sans-serif;
+  --font-mono-sys: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --ease-apple: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+html { -webkit-text-size-adjust: 100%; text-rendering: optimizeLegibility; }
+body { font-family: var(--font-sans); font-size: 15px; line-height: 1.47; letter-spacing: -0.011em; }
+h1, h2, h3, h4, .font-display, .display { font-family: var(--font-display); font-weight: 600; letter-spacing: -0.022em; line-height: 1.12; font-style: normal; }
+h1 { font-weight: 700; letter-spacing: -0.03em; }
+
+/* One typeface family. The serif / mono / legacy display classes now resolve to
+   the system font so the whole app reads as a single voice. */
+.font-serif, .font-bebas, .font-outfit, .instrument-italic { font-family: var(--font-display); font-style: normal; letter-spacing: -0.02em; }
+.font-mono, .font-jetbrains { font-family: var(--font-sans); font-variant-numeric: tabular-nums; }
+.italic, .font-serif.italic, .display-italic { font-style: normal; }
+code, kbd, pre, samp, .font-code { font-family: var(--font-mono-sys); }
+
+/* Small caps-and-tracking micro-labels are jargon-y and hard to read: render
+   them as plain sentence-case labels at a legible size. */
+.label-mono { font-family: var(--font-sans); font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 600; color: var(--text-secondary); }
+.uppercase { text-transform: none !important; }
+[class*="tracking-widest"], [class*="tracking-wider"], [class*="tracking-[0"], [class*="tracking-[."] { letter-spacing: 0 !important; }
+[class*="text-[8px]"], [class*="text-[9px]"], [class*="text-[10px]"], [class*="text-[11px]"] { font-size: 12px !important; }
+
+/* System cursor — the custom dot/ring cursor is not a platform convention. */
+.cursor-dot, .cursor-ring, .noise-overlay { display: none !important; }
+.cursor-none { cursor: auto !important; }
+
+/* Focus is always visible (keyboard) and never a hard black box. */
+:focus { outline: none; }
+:focus-visible { outline: 3px solid rgba(0, 113, 227, 0.45); outline-offset: 2px; border-radius: inherit; }
+
+/* Controls */
+button, [role="button"], a, select, input[type="checkbox"], input[type="radio"] { -webkit-tap-highlight-color: transparent; }
+button:not(:disabled), [role="button"] { transition: background-color .18s var(--ease-apple), color .18s var(--ease-apple), transform .18s var(--ease-apple), box-shadow .18s var(--ease-apple), opacity .18s var(--ease-apple); }
+button:not(:disabled):active { transform: scale(0.98); }
+button:disabled, [aria-disabled="true"] { cursor: not-allowed; }
+input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea { font-family: var(--font-sans); font-size: 15px; }
+::placeholder { color: var(--text-tertiary); opacity: 1; }
+::selection { background: rgba(0, 113, 227, 0.22); }
+
+/* Materials: hairline borders + soft, diffuse shadows instead of hard rules. */
+.glass-panel { background: rgba(255,255,255,0.78); backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px); border: 0.5px solid rgba(0,0,0,0.08); box-shadow: var(--shadow-md); }
+.shadow, .shadow-sm { box-shadow: var(--shadow-sm); }
+.shadow-md, .shadow-lg, .shadow-xl { box-shadow: var(--shadow-md); }
+.shadow-2xl { box-shadow: var(--shadow-lg); }
+
+/* Scrollbars: thin, native-feeling. */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: rgba(0,0,0,0.22); border-radius: 8px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: rgba(0,0,0,0.38); background-clip: content-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; }
+}
+
+/* Dark surface (Apple "dark card"): inside .bg-night the ink / line / semantic
+   tokens flip so every utility built on them (text-ink-2, border-line,
+   text-success…) stays legible without touching each child. */
+.bg-night, .bg-night\/95, .bg-night\/90, .bg-night\/80 {
+  --color-ink: #FFFFFF;
+  --color-ink-2: rgba(255,255,255,0.72);
+  --color-ink-3: rgba(255,255,255,0.55);
+  --color-line: rgba(255,255,255,0.14);
+  --color-line-soft: rgba(255,255,255,0.08);
+  --color-line-strong: rgba(255,255,255,0.22);
+  --color-brand: #2997FF;
+  --color-brand-light: #64B5FF;
+  --color-brand-tint: rgba(41,151,255,0.16);
+  --color-brand-soft: rgba(41,151,255,0.32);
+  --color-success: #30D158;
+  --color-warning: #FF9F0A;
+  --color-danger: #FF6961;
+  --color-danger-tint: rgba(255,105,97,0.16);
+  --color-success-tint: rgba(48,209,88,0.16);
+  --color-warning-tint: rgba(255,159,10,0.16);
+  --color-canvas: rgba(255,255,255,0.06);
+  --color-surface-2: rgba(255,255,255,0.10);
+  color: #FFFFFF;
+}
+
+/* Light components nested inside a dark card keep normal (light-mode) tokens. */
+.bg-night .bg-white, .bg-night .bg-surface {
+  --color-ink: #1D1D1F; --color-ink-2: #515154; --color-ink-3: #6E6E73;
+  --color-line: #E5E5EA; --color-line-soft: #F0F0F3; --color-line-strong: #D2D2D7;
+  --color-brand: #0071E3; --color-brand-light: #2997FF; --color-brand-tint: #E8F2FD; --color-brand-soft: #BBD8F7;
+  --color-success: #248A3D; --color-warning: #B25E00; --color-danger: #D70015;
+  --color-danger-tint: #FFEBEE; --color-success-tint: #E6F6EA; --color-warning-tint: #FFF4E0;
+  --color-canvas: #F5F5F7; --color-surface-2: #EBEBF0;
+  color: #1D1D1F;
+}
