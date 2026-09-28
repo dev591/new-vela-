@@ -230,25 +230,31 @@ export default function Login() {
    */
   const enterAsPatient = async () => {
     setPatientLoading(true)
-    try {
-      const res = await fetch(`${API_URL}/api/demo/login-patient`, { method: 'POST' })
-      const data = await res.json()
-      if (data?.status === 'success' && data.patient) {
-        localStorage.setItem('vela_token', data.token || '')
-        localStorage.setItem('vela_auth', 'true')
-        localStorage.setItem('vela_role', 'patient')
-        localStorage.setItem('vela_vela_id', data.vela_id || '')
-        localStorage.setItem('vela_patient', JSON.stringify(data.patient))
-        localStorage.setItem('vela_email', data.patient.email || '')
-        navigate('/patient-dashboard')
-        return
+    setError('')
+    // The demo patient is a fixed seed account: never fall through to "create account".
+    // Retry a couple of times (cold database / first request), then show a clear message.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        const res = await fetch(`${API_URL}/api/demo/login-patient`, { method: 'POST', signal: AbortSignal.timeout(15000) })
+        const data = await res.json()
+        if (data?.status === 'success' && data.patient) {
+          localStorage.setItem('vela_token', data.token || '')
+          localStorage.setItem('vela_auth', 'true')
+          localStorage.setItem('vela_role', 'patient')
+          localStorage.setItem('vela_vela_id', data.vela_id || '')
+          localStorage.setItem('vela_patient', JSON.stringify(data.patient))
+          localStorage.setItem('vela_email', data.patient.email || '')
+          setPatientLoading(false)
+          navigate('/patient-dashboard')
+          return
+        }
+      } catch {
+        /* retry below */
       }
-      navigate('/portal')
-    } catch {
-      navigate('/portal')
-    } finally {
-      setPatientLoading(false)
+      await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
     }
+    setError("Couldn't open the demo patient. Please check the server is running and tap again.")
+    setPatientLoading(false)
   }
 
   const copyValue = (value: string, type: 'email' | 'password') => {

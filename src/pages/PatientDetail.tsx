@@ -7,7 +7,6 @@ import { socket, type SocketEventPayload } from '../hooks/useSocket'
 import PatientHistoryRag from '../components/PatientHistoryRag'
 import ImagingAnalysis from '../components/ImagingAnalysis'
 import toast from 'react-hot-toast'
-import Atlas from '../components/Atlas/Atlas'
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip } from 'recharts'
 import { TrendingUp, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 
@@ -2334,10 +2333,6 @@ export default function PatientDetail() {
           )}
         </div>
         
-        {/* Floating Atlas Assistant */}
-        <div style={{ position: 'fixed', bottom: 32, right: 32, zIndex: 100 }}>
-          <Atlas currentPatientId={id} userRole="doctor" />
-        </div>
       </main>
 
       {/* Original-scan lightbox — lets the doctor read the source themselves

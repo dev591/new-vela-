@@ -22,8 +22,10 @@ interface AtlasOrbProps {
  * blue rebrand, which is why it looked disconnected from the rest of the UI.
  */
 
-const BRAND = '#1E63C7';
-const BRAND_LIGHT = '#4E8AE0';
+const BRAND = '#0071E3';
+const BRAND_LIGHT = '#2997FF';
+const BLUE_CORE = 'radial-gradient(circle at 32% 26%, #6BB8FF, #0071E3 58%, #0058B0)';
+const IDLE_CORE = 'linear-gradient(180deg, #FFFFFF, #F2F2F7)';
 
 type OrbConfig = {
   core: string;
@@ -42,18 +44,18 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
       case 'waking':
       case 'listening':
         return {
-          core: `radial-gradient(circle at 32% 28%, #2A3441, #0E1218 70%)`,
+          core: BLUE_CORE,
           ring: BRAND_LIGHT,
-          halo: `radial-gradient(circle, rgba(78,138,224,0.35), transparent 68%)`,
+          halo: `radial-gradient(circle, rgba(41,151,255,0.35), transparent 68%)`,
           haloScale: 2.1,
           ripples: true,
           label: 'Listening',
         };
       case 'processing':
         return {
-          core: `radial-gradient(circle at 32% 28%, #232C38, #0E1218 70%)`,
+          core: BLUE_CORE,
           ring: BRAND,
-          halo: `radial-gradient(circle, rgba(30,99,199,0.22), transparent 70%)`,
+          halo: `radial-gradient(circle, rgba(0,113,227,0.22), transparent 70%)`,
           haloScale: 1.7,
           ripples: false,
           label: 'Thinking',
@@ -61,17 +63,17 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
       case 'streaming':
       case 'speaking':
         return {
-          core: `radial-gradient(circle at 32% 28%, #2A3441, #0E1218 70%)`,
+          core: BLUE_CORE,
           ring: BRAND_LIGHT,
-          halo: `radial-gradient(circle, rgba(78,138,224,0.28), transparent 68%)`,
+          halo: `radial-gradient(circle, rgba(41,151,255,0.28), transparent 68%)`,
           haloScale: 1.9,
           ripples: false,
           label: 'Speaking',
         };
       case 'error':
         return {
-          core: `radial-gradient(circle at 32% 28%, #3A2226, #16090C 70%)`,
-          ring: '#DC4B54',
+          core: 'radial-gradient(circle at 32% 26%, #FF8A84, #D70015 62%, #A80010)',
+          ring: '#D70015',
           halo: `radial-gradient(circle, rgba(220,75,84,0.25), transparent 70%)`,
           haloScale: 1.6,
           ripples: false,
@@ -79,12 +81,12 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
         };
       default: // sleeping
         return {
-          core: `radial-gradient(circle at 32% 28%, #232C38, #0E1218 72%)`,
-          ring: 'rgba(255,255,255,0.14)',
-          halo: `radial-gradient(circle, rgba(30,99,199,0.10), transparent 70%)`,
+          core: IDLE_CORE,
+          ring: 'rgba(0,0,0,0.10)',
+          halo: `radial-gradient(circle, rgba(0,113,227,0.10), transparent 70%)`,
           haloScale: 1.4,
           ripples: false,
-          label: 'Hold space to ask',
+          label: 'Ask Atlas',
         };
     }
   };
@@ -111,10 +113,10 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
             exit={{ opacity: 0, y: 4 }}
             transition={{ duration: 0.22 }}
             style={{
-              position: 'absolute', top: -44, whiteSpace: 'nowrap',
-              padding: '7px 14px', borderRadius: 999,
-              color: '#fff', fontSize: 10, letterSpacing: '0.16em',
-              textTransform: 'uppercase', fontFamily: "'Geist Mono', monospace",
+              position: 'absolute', top: -40, whiteSpace: 'nowrap',
+              padding: '6px 12px', borderRadius: 999,
+              color: '#fff', fontSize: 13, fontWeight: 500,
+              fontFamily: 'var(--font-sans)',
               background: 'rgba(14,18,24,0.92)',
               backdropFilter: 'blur(8px)',
               boxShadow: '0 6px 24px rgba(0,0,0,0.22)',
@@ -126,7 +128,7 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
         )}
       </AnimatePresence>
 
-      <div style={{ position: 'relative', width: 84, height: 84, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ position: 'relative', width: 60, height: 60, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
 
         {/* 1 — ripples: only while actually hearing the room */}
         <AnimatePresence>
@@ -138,7 +140,7 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
               exit={{ opacity: 0 }}
               transition={{ duration: 2.2, repeat: Infinity, delay: i * 1.1, ease: 'easeOut' }}
               style={{
-                position: 'absolute', width: 48, height: 48, borderRadius: '50%',
+                position: 'absolute', width: 44, height: 44, borderRadius: '50%',
                 border: `1px solid ${BRAND_LIGHT}`,
               }}
             />
@@ -153,7 +155,7 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
           }}
           transition={{ duration: active ? 2 : 5, repeat: Infinity, ease: 'easeInOut' }}
           style={{
-            position: 'absolute', width: 56, height: 56, borderRadius: '50%',
+            position: 'absolute', width: 52, height: 52, borderRadius: '50%',
             background: cfg.halo, filter: 'blur(4px)', pointerEvents: 'none',
           }}
         />
@@ -164,7 +166,7 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
             animate={{ rotate: 360 }}
             transition={{ duration: 1.6, repeat: Infinity, ease: 'linear' }}
             style={{
-              position: 'absolute', width: 58, height: 58, borderRadius: '50%',
+              position: 'absolute', width: 54, height: 54, borderRadius: '50%',
               background: `conic-gradient(from 0deg, transparent 0deg, ${BRAND} 300deg, transparent 360deg)`,
               WebkitMask: 'radial-gradient(circle, transparent 60%, #000 62%)',
               mask: 'radial-gradient(circle, transparent 60%, #000 62%)',
@@ -191,19 +193,19 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
           whileHover={{ scale: 1.08 }}
           style={{
             position: 'relative',
-            width: 50, height: 50, borderRadius: '50%',
+            width: 44, height: 44, borderRadius: '50%',
             background: cfg.core,
             border: `1px solid ${cfg.ring}`,
             boxShadow: active
-              ? `0 8px 28px rgba(0,0,0,0.28), inset 0 1px 1px rgba(255,255,255,0.14)`
-              : `0 4px 16px rgba(0,0,0,0.18), inset 0 1px 1px rgba(255,255,255,0.08)`,
+              ? `0 6px 20px rgba(0,113,227,0.35), inset 0 1px 1px rgba(255,255,255,0.35)`
+              : `0 2px 10px rgba(0,0,0,0.10), inset 0 1px 1px rgba(255,255,255,0.9)`,
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }}
         >
           {/* specular highlight — sells it as a sphere, not a circle */}
           <div style={{
-            position: 'absolute', top: 6, left: 11, width: 16, height: 10,
-            borderRadius: '50%', background: 'rgba(255,255,255,0.16)',
+            position: 'absolute', top: 5, left: 10, width: 14, height: 9,
+            borderRadius: '50%', background: 'rgba(255,255,255,0.35)',
             filter: 'blur(4px)', pointerEvents: 'none',
           }} />
 
@@ -212,8 +214,8 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
             <motion.div
               animate={{ scale: [1, 1.35, 1], opacity: [0.85, 1, 0.85] }}
               transition={{ duration: 1.1, repeat: Infinity, ease: 'easeInOut' }}
-              style={{ width: 9, height: 9, borderRadius: '50%', background: BRAND_LIGHT,
-                       boxShadow: `0 0 12px ${BRAND_LIGHT}` }}
+              style={{ width: 9, height: 9, borderRadius: '50%', background: '#fff',
+                       boxShadow: '0 0 10px rgba(255,255,255,0.9)' }}
             />
           ) : state === 'speaking' || state === 'streaming' ? (
             <div style={{ display: 'flex', gap: 3, alignItems: 'center', height: 18 }}>
@@ -222,8 +224,7 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
                   key={i}
                   animate={{ height: [5, 16, 8, 14, 5] }}
                   transition={{ duration: 0.9, repeat: Infinity, delay: i * 0.12, ease: 'easeInOut' }}
-                  style={{ width: 2.5, borderRadius: 2, background: BRAND_LIGHT,
-                           boxShadow: `0 0 8px ${BRAND_LIGHT}` }}
+                  style={{ width: 2.5, borderRadius: 2, background: '#fff' }}
                 />
               ))}
             </div>
@@ -231,12 +232,12 @@ export default function AtlasOrb({ state, onStop }: AtlasOrbProps) {
             <motion.div
               animate={{ opacity: [0.35, 1, 0.35] }}
               transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
-              style={{ width: 7, height: 7, borderRadius: '50%', background: BRAND }}
+              style={{ width: 7, height: 7, borderRadius: '50%', background: '#fff' }}
             />
           ) : (
             <svg width="19" height="19" viewBox="0 0 24 24" fill="none"
-                 stroke={state === 'error' ? '#DC4B54' : 'rgba(255,255,255,0.42)'}
-                 strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                 stroke={state === 'error' ? '#fff' : BRAND}
+                 strokeWidth="1.9" strokeLinecap="round" strokeLinejoin="round">
               <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
               <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
               <line x1="12" y1="19" x2="12" y2="22" />

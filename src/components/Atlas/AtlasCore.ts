@@ -452,7 +452,22 @@ class AtlasCore {
     })
   }
 
-  private async speakAnswer(_question: string, answer: string, fullResponse: any) {
+  // Strip markdown so TTS doesn't read "asterisk asterisk" etc. aloud.
+  private cleanForSpeech(text: string): string {
+    return text
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]*)`/g, "$1")
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/^\s*[-*+•]\s+/gm, "")
+      .replace(/^\s*>\s?/gm, "")
+      .replace(/[*_~#`|]+/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+  }
+
+  private async speakAnswer(_question: string, rawAnswer: string, fullResponse: any) {
+    const answer = this.cleanForSpeech(rawAnswer)
     this.isSpeaking = true
     this.interrupted = false
     this.setState("speaking")

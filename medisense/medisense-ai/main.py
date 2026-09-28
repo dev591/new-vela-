@@ -67,6 +67,16 @@ LOCAL_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vela_l
 def init_local_db():
     conn = sqlite3.connect(LOCAL_DB_PATH)
     cursor = conn.cursor()
+
+    # 0. audit_log — who touched patient data, when (HIPAA-style access trail)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT DEFAULT CURRENT_TIMESTAMP,
+        role TEXT, actor TEXT, staff_id TEXT, hospital_id TEXT,
+        method TEXT, path TEXT, status INTEGER, ip TEXT
+    )
+    """)
     
     # 1. admissions table
     cursor.execute("""
@@ -321,6 +331,11 @@ def init_local_db():
     conn.commit()
     conn.close()
     print("🤖 Local SQLite database initialized successfully!")
+
+class _LocalRows:
+    """Wraps local SQLite rows so they read like a Supabase response (`.data`)."""
+    def __init__(self, data):
+        self.data = data
 
 def local_query(query, params=()):
     conn = sqlite3.connect(LOCAL_DB_PATH)
@@ -672,6 +687,36 @@ def issue_session_token(
     }
     return token
 
+_PHI_PREFIXES = ("/api/patients", "/api/atlas", "/api/documents", "/api/lab/orders", "/api/emergency")
+
+def _is_phi_path(path: str) -> bool:
+    return path.startswith(_PHI_PREFIXES)
+
+def _write_audit(session: dict, request, status: int) -> None:
+    """Best-effort access log; never lets a logging failure break a request."""
+    try:
+        conn = sqlite3.connect(LOCAL_DB_PATH)
+        conn.execute(
+            "INSERT INTO audit_log (role, actor, staff_id, hospital_id, method, path, status, ip) VALUES (?,?,?,?,?,?,?,?)",
+            (session.get("role"), session.get("name"), session.get("staff_id"), session.get("hospital_id"),
+             request.method, request.url.path, status, request.client.host if request.client else ""),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"⚠️ audit log write failed: {e}")
+
+@fastapi_app.get("/api/audit-log")
+def get_audit_log(request: _Request, limit: int = 100):
+    """Manager-only view of recent patient-data access."""
+    if (getattr(request.state, "session", None) or {}).get("role") != "manager":
+        return _JSONResponse(status_code=403, content={"status": "error", "message": "Managers only"})
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT ?", (min(limit, 500),))]
+    conn.close()
+    return {"status": "success", "entries": rows}
+
 @fastapi_app.middleware("http")
 async def _require_auth(request: _Request, call_next):
     path = request.url.path
@@ -695,7 +740,10 @@ async def _require_auth(request: _Request, call_next):
             headers=_cors_headers(request),
         )
     request.state.session = session
-    return await call_next(request)
+    response = await call_next(request)
+    if _is_phi_path(path):
+        asyncio.create_task(asyncio.to_thread(_write_audit, session, request, response.status_code))
+    return response
 
 @fastapi_app.post("/api/demo/login-patient")
 async def demo_login_patient():
@@ -714,8 +762,21 @@ async def demo_login_patient():
         return _JSONResponse(status_code=404,
                              content={"status": "error", "message": "Not found"})
 
-    seeded = await asyncio.to_thread(seed_demo_patient)
-    patient = (seeded or {}).get("patient")
+    # The demo login must not fail on stage: retry transient database errors, and if the
+    # database stays unreachable fall back to the last patient we loaded successfully.
+    patient = None
+    for attempt in range(3):
+        try:
+            seeded = await asyncio.to_thread(seed_demo_patient)
+            patient = (seeded or {}).get("patient")
+        except Exception as e:
+            print(f"⚠️ demo login attempt {attempt + 1} failed: {e}")
+        if patient:
+            _DEMO_PATIENT_CACHE["patient"] = patient
+            break
+        await asyncio.sleep(0.4 * (attempt + 1))
+    if not patient:
+        patient = _DEMO_PATIENT_CACHE.get("patient")
     if not patient:
         return _JSONResponse(
             status_code=503,
@@ -1203,6 +1264,101 @@ async def update_patient(patient_id: str, request: Request):
         return {"status": "error", "message": "Patient not found or update failed"}
     _LIVE_DOCS_CACHE.pop(patient_id, None)
     return {"status": "success", "patient": result.data[0]}
+
+@fastapi_app.post("/api/patient/{patient_id}/revisit")
+async def patient_revisit(patient_id: str, request: Request):
+    """Patient taps "See the doctor about my results": join the same doctor's queue directly,
+    without booking or going through reception. Reuses the normal arrival flow so the ticket,
+    the doctor's live queue and the next-patient pre-cache all behave exactly as for a check-in."""
+    sess = getattr(request.state, "session", None) or {}
+    if sess.get("role") == "patient" and sess.get("staff_id") and sess.get("staff_id") != patient_id:
+        return _JSONResponse(status_code=403, content={"status": "error", "message": "You can only do this for yourself"})
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = (body.get("reason") or "Follow-up: lab results ready").strip()[:200] if isinstance(body, dict) else "Follow-up: lab results ready"
+
+    def _active_ticket():
+        r = supabase_admin.table("tickets").select("*").eq("patient_id", patient_id).in_("status", ["waiting", "in-progress"]).order("created_at", desc=True).limit(1).execute()
+        return r.data[0] if r.data else None
+
+    def _people_ahead(ticket):
+        if ticket.get("status") != "waiting":
+            return 0
+        q = supabase_admin.table("tickets").select("id").eq("status", "waiting").lt("queue_position", ticket["queue_position"])
+        if ticket.get("doctor_id"):
+            q = q.eq("doctor_id", ticket["doctor_id"])
+        return len(q.execute().data or [])
+
+    def _doctor_name(did):
+        if not did:
+            return "your doctor"
+        r = supabase_admin.table("vela_staff").select("name").eq("id", did).execute()
+        return (r.data[0]["name"] if r.data else "your doctor")
+
+    # Already waiting or with the doctor? Don't create a duplicate — just report where they are.
+    active = await asyncio.to_thread(_active_ticket)
+    if active:
+        ahead = await asyncio.to_thread(_people_ahead, active)
+        return {"status": "success", "already_in_queue": True, "ticket_number": active["ticket_number"],
+                "queue_position": ahead + 1, "people_ahead": ahead, "doctor_name": await asyncio.to_thread(_doctor_name, active.get("doctor_id"))}
+
+    # Same doctor who saw them last; otherwise a doctor at the hospital that ran their tests.
+    def _pick_doctor():
+        last = supabase_admin.table("tickets").select("doctor_id").eq("patient_id", patient_id).order("created_at", desc=True).limit(1).execute()
+        did = last.data[0].get("doctor_id") if last.data else None
+        hid = None
+        if did:
+            st = supabase_admin.table("vela_staff").select("hospital_id").eq("id", did).eq("active", True).execute()
+            if st.data:
+                hid = st.data[0].get("hospital_id")
+            else:
+                did = None
+        if not did:
+            rows = local_query("SELECT hospital_id FROM test_orders WHERE patient_id = ? AND hospital_id IS NOT NULL ORDER BY ordered_at DESC LIMIT 1", (patient_id,))
+            hid = rows[0]["hospital_id"] if rows else None
+            if hid:
+                docs = supabase_admin.table("vela_staff").select("id").eq("hospital_id", hid).eq("role", "doctor").eq("active", True).order("online", desc=True).limit(1).execute()
+                did = docs.data[0]["id"] if docs.data else None
+        return did, hid
+
+    doctor_id, hospital_id = await asyncio.to_thread(_pick_doctor)
+    if not doctor_id:
+        return {"status": "error", "message": "We couldn't find your doctor right now. Please ask at the reception desk."}
+
+    def _create_appointment():
+        hosp = supabase_admin.table("vela_hospitals").select("name, address").eq("id", hospital_id).execute() if hospital_id else None
+        h = (hosp.data[0] if hosp and hosp.data else {})
+        now = datetime.now()
+        payload = json.dumps({"checklist": {}, "patient_notes": reason, "doctor_id": doctor_id, "doctor_name": _doctor_name(doctor_id)})
+        res = supabase_admin.table("appointments").insert({
+            "patient_id": patient_id, "hospital_name": h.get("name"), "hospital_address": h.get("address"),
+            "hospital_place_id": hospital_id, "date": now.strftime("%Y-%m-%d"), "time": now.strftime("%H:%M"),
+            "doctor_id": doctor_id, "status": "scheduled", "reason": payload,
+        }).execute()
+        return res.data[0] if res.data else None
+
+    appointment = await asyncio.to_thread(_create_appointment)
+    if not appointment:
+        return {"status": "error", "message": "Could not add you to the queue. Please try again."}
+
+    arrived = await mark_appointment_arrived(appointment["id"])
+    if not isinstance(arrived, dict) or arrived.get("status") != "success":
+        return {"status": "error", "message": "Could not add you to the queue. Please try again."}
+
+    # Let the doctor see why this patient is back.
+    try:
+        await asyncio.to_thread(lambda: supabase_admin.table("tickets").update({"notes": reason}).eq("ticket_number", arrived["ticket_number"]).execute())
+    except Exception as e:
+        print(f"⚠️ Warning: could not label follow-up ticket: {e}")
+
+    ticket = await asyncio.to_thread(_active_ticket)
+    ahead = await asyncio.to_thread(_people_ahead, ticket) if ticket else max(0, (arrived.get("queue_position") or 1) - 1)
+    return {"status": "success", "already_in_queue": False, "appointment_id": appointment["id"],
+            "ticket_number": arrived["ticket_number"], "queue_position": ahead + 1, "people_ahead": ahead,
+            "doctor_name": await asyncio.to_thread(_doctor_name, doctor_id)}
+
 
 @fastapi_app.get("/api/patient/by-email/{email}")
 async def get_patient_by_email(email: str):
@@ -4710,7 +4866,12 @@ async def mark_appointment_arrived(appointment_id: str):
     supabase.table("tickets").insert(ticket_data).execute()
     
     # 3. Update appointment with queue position
-    supabase.table("appointments").update({"queue_position": q_pos}).eq("id", appointment_id).execute()
+    try:
+        supabase.table("appointments").update({"queue_position": q_pos}).eq("id", appointment_id).execute()
+    except Exception as e:
+        # The appointments table has no queue_position column; the ticket already holds it, and the
+        # patient's live position is read from the ticket. Don't fail a successful check-in over it.
+        print(f"ℹ️ appointments.queue_position not stored ({str(e)[:60]})")
 
     if doc_id:
         try:
@@ -4841,7 +5002,6 @@ def get_patient_appointments(patient_id: str):
 @fastapi_app.get("/api/hospital/overview")
 def get_hospital_overview(hospital_id: str = "VLA-MAIN"):
     try:
-        patients_res = supabase_admin.table("patients").select("*").eq("hospital_id", hospital_id).execute()
         beds_res = supabase_admin.table("beds").select("*").eq("hospital_id", hospital_id).execute()
         staff_res = supabase_admin.table("vela_staff").select("*").eq("hospital_id", hospital_id).execute()
         docs_res = supabase_admin.table("documents").select("*").execute() # Docs usually linked to patient, so hospital_id filter implicitly handled if we filter patients
@@ -4849,20 +5009,29 @@ def get_hospital_overview(hospital_id: str = "VLA-MAIN"):
         # Today's appointments
         from datetime import datetime
         today = datetime.now().strftime("%Y-%m-%d")
-        apt_res = supabase_admin.table("appointments").select("*").eq("hospital_id", hospital_id).eq("date", today).execute()
+        apt_res = supabase_admin.table("appointments").select("*").eq("hospital_place_id", hospital_id).eq("date", today).execute()
 
         # Admission stats
-        admissions_res = supabase_admin.table("admissions").select("*").eq("hospital_id", hospital_id).execute()
-        admissions_data = admissions_res.data or []
+        # Admissions are stored in the local database (see /api/admit), not in Supabase.
+        admissions_data = local_query("SELECT * FROM admissions WHERE hospital_id = ?", (hospital_id,)) or []
         active_inpatients = len([a for a in admissions_data if a.get('status') == 'active'])
         
         # Today's admissions count
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        admissions_today = len([a for a in admissions_data if a.get('admitted_at') >= today_start])
+        admissions_today = len([a for a in admissions_data if (a.get('admitted_at') or '') >= today_start])
 
-        patients_data = patients_res.data or []
-        beds_data = beds_res.data or []
+        # The patients table has no hospital column: a hospital's patients are the ones who have
+        # been ticketed by its doctors, booked with it, or admitted to it.
         staff_data = staff_res.data or []
+        staff_ids = [x["id"] for x in staff_data if x.get("id")]
+        pid_set = {a.get("patient_id") for a in admissions_data if a.get("patient_id")}
+        if staff_ids:
+            tk = supabase_admin.table("tickets").select("patient_id").in_("doctor_id", staff_ids).execute()
+            pid_set |= {t["patient_id"] for t in (tk.data or []) if t.get("patient_id")}
+        ap = supabase_admin.table("appointments").select("patient_id").eq("hospital_place_id", hospital_id).execute()
+        pid_set |= {a["patient_id"] for a in (ap.data or []) if a.get("patient_id")}
+        patients_data = (supabase_admin.table("patients").select("*").in_("id", list(pid_set)).execute().data or []) if pid_set else []
+        beds_data = beds_res.data or []
         docs_data = docs_res.data or []
 
         total_beds = len(beds_data)
@@ -7989,17 +8158,23 @@ async def wipe_patient_mem0(data: dict):
 
 # ── DEMO PATIENT SEED ──
 
+_DEMO_PATIENT_CACHE: dict = {}
+
 @fastapi_app.post("/api/demo/seed-patient")
 def seed_demo_patient():
     """Creates the demo patient if they don't exist. Safe to call multiple times."""
     demo_email = "patient@vela.ai"
     demo_name = "Rajesh Kumar"
 
-    existing = supabase.table("patients").select("*").eq("email", demo_email).execute()
+    # Find the seed by its VELA ID first: the name and email are editable by the patient
+    # (Edit my details), the ID is not — so the demo login can't lose its patient.
+    existing = supabase.table("patients").select("*").eq("vela_id", "VLA-8888").limit(1).execute()
+    if not existing.data:
+        existing = supabase.table("patients").select("*").eq("email", demo_email).limit(1).execute()
     if existing.data:
         patient = existing.data[0]
         if not patient.get("vela_id"):
-            update_res = supabase.table("patients").update({"vela_id": "VLA-8888"}).eq("email", demo_email).execute()
+            update_res = supabase.table("patients").update({"vela_id": "VLA-8888"}).eq("id", patient["id"]).execute()
             if update_res.data:
                 patient = update_res.data[0]
         return {"status": "success", "patient": patient, "created": False}
@@ -8385,8 +8560,9 @@ def complete_walkthrough(data: dict):
 def command_center(hospital_id: str):
     try:
         staff = supabase_admin.table("vela_staff").select("id, name, role, online, last_active").eq("hospital_id", hospital_id).eq("active", True).execute()
-        admissions = supabase_admin.table("admissions").select("id, status, admitted_at, discharged_at").eq("hospital_id", hospital_id).execute()
-        lab_orders = supabase_admin.table("test_orders").select("id, status").execute()
+        # Admissions and lab orders live in the local database, not in Supabase.
+        admissions = _LocalRows(local_query("SELECT id, status, admitted_at, discharged_at FROM admissions WHERE hospital_id = ?", (hospital_id,)))
+        lab_orders = _LocalRows(local_query("SELECT id, status FROM test_orders WHERE hospital_id = ?", (hospital_id,)))
         today = datetime.utcnow().strftime("%Y-%m-%d")
         queries = supabase_admin.table("voice_queries").select("id").gte("created_at", today).execute()
         

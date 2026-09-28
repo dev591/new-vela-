@@ -544,7 +544,7 @@ export default function VelaOwner() {
           <div style={{ maxWidth: 640, width: '100%', background: '#FFFFFF', border: '1px solid rgba(0,113,227,0.3)', borderRadius: 24, padding: 48, maxHeight: '90vh', overflowY: 'auto' }}>
             <h1 style={{ fontFamily: 'var(--font-sans)', fontSize: 40, color: 'var(--brand)', marginBottom: 16 }}>Network Terms</h1>
             <div style={{ color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.6, marginBottom: 32, display: 'flex', flexDirection: 'column', gap: 16 }}>
-              <p>By onboarding this hospital to the Vela Network, you acknowledge that you are initiating a clinical synchronization process. All data will be handled as per HIPAA and global healthcare standards.</p>
+              <p>By onboarding this hospital to the Vela Network, you acknowledge that you are initiating a clinical synchronization process. Patient data is handled under HIPAA-aligned safeguards (role-based access, access audit logging, session timeouts); each hospital remains responsible for its own regulatory compliance.</p>
               <p>The Vela Command Center provides AI-driven diagnostics through the Atlas engine. Medical decisions must be validated by licensed professionals. Vela is an assistive intelligence layer, not a replacement for human clinical judgement.</p>
               <p>Hospitals on the network are granted access to real-time predictive analytics, bed management systems, and cross-facility clinical intelligence.</p>
             </div>
