@@ -1,0 +1,10 @@
+# Only the frontend is deployed to Vercel; the FastAPI backend is hosted separately.
+medisense/
+motion/
+hello/
+docs/
+dist/
+*.pdf
+*.mp3
+*.vsix
+*.local.md
