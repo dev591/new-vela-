@@ -1,0 +1,54 @@
+# Render Blueprint for the VELA backend (FastAPI + Socket.IO).
+# The frontend is deployed separately on Vercel.
+services:
+  - type: web
+    name: vela-api
+    runtime: python
+    rootDir: medisense/medisense-ai
+    # Render has no Mumbai region; Singapore is the closest to the Supabase project in ap-south-1.
+    region: singapore
+    # A persistent disk needs a paid instance. The free tier wipes local files on every restart.
+    plan: starter
+    buildCommand: pip install -r requirements.txt
+    # One process only: Socket.IO rooms and the login rate limiter live in memory.
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    disk:
+      name: vela-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.8"
+      # Local SQLite (sessions, audit log, lab orders, admissions) and generated PDFs on the disk.
+      - key: VELA_LOCAL_DB
+        value: /var/data/vela_local.db
+      - key: VELA_REPORTS_DIR
+        value: /var/data/generated_reports
+      - key: VELA_TRUST_PROXY
+        value: "true"
+      - key: DEMO_LOGIN
+        value: "false"
+      # Secrets: set these in the Render dashboard (sync: false = never stored in the repo).
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: api_key
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
+      - key: GOOGLE_MAPS_KEY
+        sync: false
+      - key: VELA_OWNER_EMAIL
+        sync: false
+      - key: VELA_OWNER_PASSWORD_HASH
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false

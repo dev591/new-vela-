@@ -35,7 +35,8 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-REPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_reports")
+# On a host with an ephemeral filesystem, point VELA_REPORTS_DIR at a persistent disk.
+REPORTS_DIR = os.getenv("VELA_REPORTS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "generated_reports")
 os.makedirs(REPORTS_DIR, exist_ok=True)
 
 # VELA brand
