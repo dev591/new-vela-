@@ -559,7 +559,10 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://velahealth.in",
     "https://www.velahealth.in",
-] + [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+] + [
+    # Browsers send the origin without a trailing slash; tolerate "https://x.app/" in the env var.
+    o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
+]
 
 class ScopedAsyncServer(socketio.AsyncServer):
     """Socket.IO server that never broadcasts to everyone.
