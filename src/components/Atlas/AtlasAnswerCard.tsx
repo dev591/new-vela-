@@ -40,15 +40,16 @@ export default function AtlasAnswerCard({ question, answer, streamingText, onClo
         exit={{ y: 10, opacity: 0 }}
         transition={{ duration: 0.4, ease: 'easeOut' }}
         style={{
-          position: 'absolute',
-          bottom: 80,
-          right: 0,
-          width: 340,
-          borderRadius: 16,
-          background: '#0D1524',
-          border: `1px solid ${isStreaming ? 'rgba(200,184,154,0.35)' : 'rgba(59,130,246,0.25)'}`,
+          position: 'relative',
+          width: 380,
+          maxWidth: '100%',
+          borderRadius: 24,
+          background: 'rgba(255,255,255,0.92)',
+          backdropFilter: 'saturate(180%) blur(24px)',
+          WebkitBackdropFilter: 'saturate(180%) blur(24px)',
+          border: '0.5px solid rgba(0,0,0,0.10)',
           padding: 20,
-          boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
+          boxShadow: '0 12px 40px rgba(0,0,0,0.14)',
           zIndex: 10000
         }}
       >
@@ -61,16 +62,16 @@ export default function AtlasAnswerCard({ question, answer, streamingText, onClo
                 : { opacity: [1, 0.4, 1] }
               }
               transition={{ duration: isStreaming ? 0.8 : 2, repeat: Infinity }}
-              style={{ width: 6, height: 6, borderRadius: '50%', background: isStreaming ? '#C8B89A' : '#3B82F6' }}
+              style={{ width: 6, height: 6, borderRadius: '50%', background: '#0071E3' }}
             />
-            <span style={{ fontFamily: 'var(--font-sans)', fontSize: 10, color: isStreaming ? '#C8B89A' : '#3B82F6', letterSpacing: '0.1em' }}>
-              {isStreaming ? 'ATLAS · STREAMING' : 'ATLAS'}
+            <span style={{ fontFamily: 'var(--font-sans)', fontSize: 13, fontWeight: 600, color: '#0071E3' }}>
+              {isStreaming ? 'Atlas is answering' : 'Atlas'}
             </span>
           </div>
           <button
             type="button"
             onClick={onClose}
-            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'rgba(250,250,249,0.4)', padding: 0, lineHeight: 1 }}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-tertiary)', padding: 4, lineHeight: 1 }}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -81,20 +82,20 @@ export default function AtlasAnswerCard({ question, answer, streamingText, onClo
 
         {/* Question */}
         <div style={{ marginBottom: 12 }}>
-          <p style={{ fontFamily: 'var(--font-sans)', fontSize: 11, color: 'rgba(250,250,249,0.4)', marginBottom: 4 }}>You asked:</p>
-          <p style={{ fontFamily: 'var(--font-sans)', fontSize: 13, color: 'rgba(250,250,249,0.65)', fontStyle: 'italic', lineHeight: 1.5 }}>"{question}"</p>
+          <p style={{ fontFamily: 'var(--font-sans)', fontSize: 13, color: 'var(--text-secondary)', marginBottom: 4 }}>You asked</p>
+          <p style={{ fontFamily: 'var(--font-sans)', fontSize: 15, color: 'var(--text-secondary)', lineHeight: 1.45 }}>“{question}”</p>
         </div>
 
         {/* Divider */}
-        <div style={{ height: 1, background: 'rgba(255,255,255,0.08)', margin: '12px 0' }} />
+        <div style={{ height: 1, background: 'rgba(0,0,0,0.08)', margin: '12px 0' }} />
 
         {/* Answer / Streaming Text */}
         <div style={{ position: 'relative', marginBottom: 12 }}>
           <p style={{
             fontFamily: 'var(--font-sans)',
-            fontSize: 14,
-            color: '#FAFAF9',
-            lineHeight: 1.7,
+            fontSize: 16,
+            color: 'var(--text)',
+            lineHeight: 1.55,
             display: !expanded ? '-webkit-box' : 'block',
             WebkitLineClamp: !expanded ? 5 : undefined,
             WebkitBoxOrient: !expanded ? 'vertical' : undefined,
@@ -109,7 +110,7 @@ export default function AtlasAnswerCard({ question, answer, streamingText, onClo
                   display: 'inline-block',
                   width: 2,
                   height: 14,
-                  background: '#C8B89A',
+                  background: '#0071E3',
                   marginLeft: 2,
                   verticalAlign: 'text-bottom',
                   borderRadius: 1,
@@ -121,7 +122,7 @@ export default function AtlasAnswerCard({ question, answer, streamingText, onClo
             <button
               type="button"
               onClick={() => setExpanded(true)}
-              style={{ fontFamily: 'var(--font-sans)', fontSize: 12, color: '#3B82F6', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0', marginTop: 4 }}
+              style={{ fontFamily: 'var(--font-sans)', fontSize: 14, fontWeight: 500, color: '#0071E3', background: 'none', border: 'none', cursor: 'pointer', padding: '4px 0', marginTop: 4 }}
             >
               Show more
             </button>
@@ -129,16 +130,16 @@ export default function AtlasAnswerCard({ question, answer, streamingText, onClo
         </div>
 
         {/* Disclaimer */}
-        <div style={{ padding: '8px 10px', background: 'rgba(255,255,255,0.04)', borderRadius: 6, marginBottom: 12 }}>
-          <p style={{ fontFamily: 'var(--font-sans)', fontSize: 9, color: 'rgba(250,250,249,0.3)', letterSpacing: '0.05em' }}>
+        <div style={{ padding: '8px 12px', background: 'var(--bg)', borderRadius: 10, marginBottom: 12 }}>
+          <p style={{ fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--text-secondary)' }}>
             AI-generated. Verify with source document.
           </p>
         </div>
 
         {/* Bottom Row */}
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{ fontFamily: 'var(--font-sans)', fontSize: 10, color: 'rgba(250,250,249,0.3)' }}>{timestamp}</span>
-          <span style={{ fontFamily: 'var(--font-sans)', fontSize: 10, color: 'rgba(250,250,249,0.3)' }}>
+          <span style={{ fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--text-tertiary)' }}>{timestamp}</span>
+          <span style={{ fontFamily: 'var(--font-sans)', fontSize: 12, color: 'var(--text-tertiary)' }}>
             {isStreaming ? 'Generating…' : `Auto-close in ${timeLeft}s`}
           </span>
         </div>

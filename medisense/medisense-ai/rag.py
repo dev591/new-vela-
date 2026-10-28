@@ -45,7 +45,7 @@ DEFAULT_TOP_K = 10
 
 # ── DATABASE ──
 
-_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vela_local.db")
+_DB_PATH = os.getenv("VELA_LOCAL_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "vela_local.db")
 _openai_client: Optional[OpenAI] = None
 
 

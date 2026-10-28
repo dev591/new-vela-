@@ -48,11 +48,27 @@ function AtlasWrapper({ currentPatientId }: { currentPatientId?: string }) {
 
   if (!showAtlas) return null;
 
-  return <Atlas currentPatientId={currentPatientId} />;
+  return <Atlas currentPatientId={currentPatientId} userRole="doctor" />;
 }
 
 function App() {
   useSocket();
+  // Staff auto-logoff after 30 min of inactivity (HIPAA-style). Patients stay signed in by design.
+  useEffect(() => {
+    const IDLE_MS = 30 * 60 * 1000;
+    let last = Date.now();
+    const bump = () => { last = Date.now(); };
+    const evs = ["mousemove", "keydown", "click", "touchstart", "scroll"];
+    evs.forEach(e => window.addEventListener(e, bump, { passive: true }));
+    const timer = setInterval(() => {
+      const role = localStorage.getItem("vela_role");
+      if (localStorage.getItem("vela_auth") === "true" && role && role !== "patient" && Date.now() - last > IDLE_MS) {
+        localStorage.clear();
+        window.location.href = "/login";
+      }
+    }, 30000);
+    return () => { evs.forEach(e => window.removeEventListener(e, bump)); clearInterval(timer); };
+  }, []);
   const [currentPatientId, setCurrentPatientId] = useState<string | undefined>();
   const dotRef = useRef<HTMLDivElement>(null);
   const ringRef = useRef<HTMLDivElement>(null);
@@ -191,9 +207,10 @@ function App() {
         <Route path="/scan/:velaId" element={<QRScan />} />
         <Route path="/hospital-manager" element={<ProtectedRoute roles={['hospital_manager', 'manager']}><HospitalManager /></ProtectedRoute>} />
         <Route path="/lab-controller" element={<ProtectedRoute roles={['lab_controller', 'lab']}><LabController /></ProtectedRoute>} />
-        <Route path="/ward-scan" element={<WardScan />} />
+        <Route path="/ward-scan" element={<ProtectedRoute roles={['doctor', 'nurse', 'receptionist', 'hospital_manager', 'manager', 'lab_controller', 'lab']}><WardScan /></ProtectedRoute>} />
+        {/* VelaOwner renders its own sign-in form until an owner session exists. */}
         <Route path="/vela-owner" element={<VelaOwner />} />
-        <Route path="/walkthrough" element={<ManagerWalkthrough />} />
+        <Route path="/walkthrough" element={<ProtectedRoute roles={['hospital_manager', 'manager']}><ManagerWalkthrough /></ProtectedRoute>} />
       </Routes>
       </Suspense>
       </ErrorBoundary>

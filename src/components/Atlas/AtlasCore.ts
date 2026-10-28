@@ -452,39 +452,38 @@ class AtlasCore {
     })
   }
 
-  private async speakAnswer(_question: string, answer: string, fullResponse: any) {
+  // Strip markdown so TTS doesn't read "asterisk asterisk" etc. aloud.
+  private cleanForSpeech(text: string): string {
+    return text
+      .replace(/```[\s\S]*?```/g, " ")
+      .replace(/`([^`]*)`/g, "$1")
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, "$1")
+      .replace(/^\s{0,3}#{1,6}\s+/gm, "")
+      .replace(/^\s*[-*+•]\s+/gm, "")
+      .replace(/^\s*>\s?/gm, "")
+      .replace(/[*_~#`|]+/g, " ")
+      .replace(/\s{2,}/g, " ")
+      .trim()
+  }
+
+  private async speakAnswer(_question: string, rawAnswer: string, fullResponse: any) {
+    const answer = this.cleanForSpeech(rawAnswer)
     this.isSpeaking = true
     this.interrupted = false
     this.setState("speaking")
 
-    const apiKey = import.meta.env.VITE_ELEVENLABS_API_KEY
-    const voiceId = import.meta.env.VITE_ELEVENLABS_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"
     let spoken = false
 
-    if (apiKey && apiKey.length > 10) {
+    // ElevenLabs is proxied by the backend so its key never ships to the
+    // browser; any failure (not configured, quota, network) falls back to the
+    // browser's own voice below.
+    {
       try {
-        const r = await fetch(
-          `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}/stream`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "xi-api-key": apiKey,
-              "Accept": "audio/mpeg"
-            },
-            body: JSON.stringify({
-              text: answer,
-              model_id: "eleven_turbo_v2",
-              voice_settings: {
-                stability: 0.4,
-                similarity_boost: 0.8,
-                style: 0.1,
-                use_speaker_boost: false
-              },
-              optimize_streaming_latency: 3
-            })
-          }
-        )
+        const r = await fetch(`${API_URL}/api/tts`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Accept": "audio/mpeg" },
+          body: JSON.stringify({ text: answer }),
+        })
 
         if (r.ok && r.body && typeof MediaSource !== "undefined" && MediaSource.isTypeSupported("audio/mpeg")) {
           // Start playing as soon as the first audio bytes arrive instead of waiting for the whole clip.

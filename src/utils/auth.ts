@@ -11,13 +11,14 @@ export function getToken(): string | null {
 }
 
 export function logout() {
-  const staffId = localStorage.getItem("vela_staff_id")
   const token = getToken()
-  if (staffId) {
-    fetch(`${API_URL}/api/staff/logout`, {
+  if (token) {
+    // Revokes the token server-side (and marks staff offline), so a copied
+    // token stops working the moment the user signs out.
+    fetch(`${API_URL}/api/auth/logout`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(token ? { 'Authorization': `Bearer ${token}` } : {}) },
-      body: JSON.stringify({ staff_id: staffId })
+      headers: { 'Authorization': `Bearer ${token}` },
+      keepalive: true,
     }).catch(() => {})
   }
   localStorage.clear()
@@ -101,6 +102,24 @@ export async function networkDoctorLogin(email: string, password: string): Promi
   } catch {
     return { success: false }
   }
+}
+
+// Cached records (vela_patient, the dashboard's saved lists) must not outlive
+// the session on a shared device. Mirrors the server's token lifetimes:
+// patients stay signed in for 30 days, staff for 12 hours. Run at startup.
+const LOCAL_SESSION_TTL_MS = { patient: 30 * 24 * 3600 * 1000, staff: 12 * 3600 * 1000 }
+
+export function enforceLocalSessionExpiry() {
+  try {
+    if (!isAuthenticated()) return
+    const started = Number(localStorage.getItem('vela_session_started') || 0)
+    if (!started) {
+      localStorage.setItem('vela_session_started', String(Date.now()))
+      return
+    }
+    const ttl = localStorage.getItem('vela_role') === 'patient' ? LOCAL_SESSION_TTL_MS.patient : LOCAL_SESSION_TTL_MS.staff
+    if (Date.now() - started > ttl) localStorage.clear()
+  } catch { /* storage blocked: nothing cached to expire */ }
 }
 
 // Attach the session token to every backend request without touching each

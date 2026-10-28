@@ -95,6 +95,7 @@ const PatientDashboard = () => {
   const [appointments, setAppointments] = useState<any[]>(() => readOwnCache<any[]>("vela_dash_apts", []));
   const [queueStatus, setQueueStatus] = useState<any>(null);
   const [labHistory, setLabHistory] = useState<any[]>([]);
+  const [revisiting, setRevisiting] = useState(false);
   const [activeLabOrder, setActiveLabOrder] = useState<any>(null);
   const [isLabLoading, setIsLabLoading] = useState(false);
   const [reassessing, setReassessing] = useState<string | null>(null);
@@ -532,12 +533,21 @@ const PatientDashboard = () => {
             fetchLabHistory(patient.id);
             fetchPatientData();  // the report is filed as a document too
             const flagged = (data.abnormal_fields || []).length;
-            toast.success(
-              flagged
-                ? `${data.test_type} report ready — ${flagged} value${flagged > 1 ? 's' : ''} flagged for your doctor`
-                : `${data.test_type} report ready — all values normal`,
-              { icon: '📊', duration: 7000 }
-            );
+            const msg = flagged
+              ? `${data.test_type} report ready — ${flagged} value${flagged > 1 ? 's' : ''} flagged for your doctor`
+              : `${data.test_type} report ready — all values normal`;
+            toast((t) => (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <span>{msg}</span>
+                <button
+                  type="button"
+                  onClick={() => { toast.dismiss(t.id); requestRevisit(); }}
+                  style={{ minHeight: 44, borderRadius: 12, border: 'none', background: 'var(--brand)', color: '#fff', fontSize: 15, fontWeight: 600, cursor: 'pointer' }}
+                >
+                  See the doctor about it
+                </button>
+              </div>
+            ), { icon: '📊', duration: 15000 });
             const u = new SpeechSynthesisUtterance("A new lab report has been submitted and analysed. You can view it in your tests and reports tab.");
             window.speechSynthesis.speak(u);
         }
@@ -1170,10 +1180,74 @@ const PatientDashboard = () => {
     );
   };
 
+  // --- FOLLOW-UP: results are back → straight into the doctor's queue ---
+  const hasReadyResults = labHistory.some((o: any) => o.status === 'completed');
+  const inDoctorQueue = !!queueStatus || appointments.some((a: any) => a.status === 'arrived' || a.status === 'in-progress');
+
+  const requestRevisit = async () => {
+    if (!patient?.id || revisiting) return;
+    setRevisiting(true);
+    try {
+      const res = await axios.post(`${API_URL}/api/patient/${patient.id}/revisit`, {});
+      if (res.data?.status === 'success') {
+        const ahead = res.data.people_ahead ?? 0;
+        toast.success(
+          ahead === 0
+            ? `You're next to see ${res.data.doctor_name}.`
+            : `You're in ${res.data.doctor_name}'s queue — ${ahead} ${ahead === 1 ? 'person' : 'people'} ahead of you.`,
+          { duration: 8000 }
+        );
+        fetchPatientData();   // refreshes appointments + live queue position
+      } else {
+        toast.error(res.data?.message || "Couldn't add you to the queue. Please ask at reception.");
+      }
+    } catch {
+      toast.error("Couldn't add you to the queue. Please try again.");
+    } finally {
+      setRevisiting(false);
+    }
+  };
+
+  const renderRevisitCard = () => {
+    if (!hasReadyResults) return null;
+    if (inDoctorQueue) {
+      const ahead = queueStatus?.people_ahead;
+      return (
+        <div className="bg-success-tint border border-success-soft rounded-3xl p-6 flex items-center gap-4">
+          <div className="w-12 h-12 rounded-full bg-white flex items-center justify-center text-success shrink-0"><CheckCircle size={26} /></div>
+          <div>
+            <p className="text-lg font-semibold text-ink">You're in the doctor's queue</p>
+            <p className="text-base text-ink-2">
+              {typeof ahead === 'number' ? (ahead === 0 ? "You're next." : `${ahead} ${ahead === 1 ? 'person is' : 'people are'} ahead of you.`) : 'We\'ll tell you when it\'s your turn.'}
+            </p>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="bg-white border border-line rounded-3xl p-6 flex flex-col sm:flex-row sm:items-center gap-5 shadow-sm">
+        <div className="w-12 h-12 rounded-full bg-brand-tint flex items-center justify-center text-brand shrink-0"><FileText size={24} /></div>
+        <div className="flex-1">
+          <p className="text-lg font-semibold text-ink">Your test results are ready</p>
+          <p className="text-base text-ink-2">Talk to the doctor about them. You'll join their queue straight away — no booking needed.</p>
+        </div>
+        <button
+          type="button"
+          onClick={requestRevisit}
+          disabled={revisiting}
+          className="min-h-[52px] px-6 rounded-2xl bg-brand hover:bg-brand-dark text-white text-base font-semibold transition-colors disabled:opacity-60 shrink-0"
+        >
+          {revisiting ? 'Adding you…' : 'See the doctor about my results'}
+        </button>
+      </div>
+    );
+  };
+
   // --- RENDERS ---
 
   const renderHome = () => (
     <div className="space-y-12 animate-in fade-in slide-in-from-bottom-4 duration-1000">
+      {renderRevisitCard()}
       {/* What a patient actually opens the app to do comes before anything they
           only need to look at. Booking leads; the emergency call sits beside it
           needing no typing and no navigation. */}
@@ -1461,6 +1535,7 @@ const PatientDashboard = () => {
 
   const renderReports = () => (
     <div className="space-y-12 animate-in fade-in slide-in-from-bottom-4 duration-1000">
+      {renderRevisitCard()}
       <div className="flex justify-between items-end">
         <div>
             <h2 className="text-4xl font-serif italic text-ink mb-2">Tests & Reports</h2>

@@ -41,3 +41,10 @@ github.copilot*.vsix
 # Local tooling / data
 .claude/
 *.db
+
+# Local credential notes
+*.local.md
+
+# Vercel CLI project link (per machine) and the local product-film workspace
+.vercel
+motion/

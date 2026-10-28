@@ -2,6 +2,7 @@ import { SOCKET_URL } from "../utils/config";
 import { useEffect } from "react"
 import { io } from "socket.io-client"
 import toast from "react-hot-toast"
+import { getToken } from "../utils/auth"
 
 // Real-time event payloads. Fields are the ones handlers across the app
 // actually read (Doctor, Receptionist, PatientDashboard, PatientDetail,
@@ -35,10 +36,26 @@ export interface SocketEventPayload {
   [key: string]: unknown
 }
 
-export const socket = io(SOCKET_URL)
+// The server refuses sockets without a session token and decides which rooms
+// (hospital / patient) a socket joins from that session. So the socket only
+// connects once there is a token, and re-reads it on every (re)connect.
+export const socket = io(SOCKET_URL, {
+  autoConnect: false,
+  auth: (cb) => cb({ token: getToken() }),
+})
+
+export function connectSocket() {
+  if (getToken() && !socket.connected) socket.connect()
+}
+
+// A new login must not keep riding the previous user's socket session.
+export function resetSocket() {
+  if (socket.connected) socket.disconnect()
+}
 
 export default function useSocket() {
   useEffect(() => {
+    connectSocket()
     socket.on("risk_alert", (data: SocketEventPayload) => {
       toast.error(
         `RISK ALERT — ${data.patient_name} · Score: ${data.risk_score}/100\n${data.summary}`,

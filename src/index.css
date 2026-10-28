@@ -582,3 +582,53 @@ input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, te
   --color-canvas: #F5F5F7; --color-surface-2: #EBEBF0;
   color: #1D1D1F;
 }
+
+/* ══════════════════════════════════════════════════════════════════
+   Cinematic layer — landing + sign-in only.
+   Apple product-film language on the existing tokens: black "theatre"
+   chapters between light ones, one blue accent, scroll-scrubbed motion.
+   ══════════════════════════════════════════════════════════════════ */
+:root {
+  --theatre: #000000;
+  --theatre-2: #0B0B0D;
+  --theatre-line: rgba(255,255,255,0.12);
+  --theatre-ink-2: rgba(255,255,255,0.64);
+  --theatre-ink-3: rgba(255,255,255,0.42);
+}
+
+/* Cursor: only when CinematicCursor mounted on a fine pointer. */
+.has-cinematic-cursor, .has-cinematic-cursor * { cursor: none !important; }
+.has-cinematic-cursor input, .has-cinematic-cursor textarea { cursor: text !important; }
+.vc-dot, .vc-ring { position: fixed; top: 0; left: 0; pointer-events: none; z-index: 9999; border-radius: 999px; mix-blend-mode: difference; opacity: 0; }
+.has-cinematic-cursor .vc-dot, .has-cinematic-cursor .vc-ring { opacity: 1; }
+.vc-dot { width: 6px; height: 6px; margin: -3px 0 0 -3px; background: #fff; transition: width .25s var(--ease-apple), height .25s var(--ease-apple), margin .25s var(--ease-apple), opacity .2s; }
+.vc-dot.is-hidden { opacity: 0 !important; }
+.vc-dot.is-field { width: 2px; height: 22px; margin: -11px 0 0 -1px; border-radius: 1px; }
+.vc-ring { width: 36px; height: 36px; margin: -18px 0 0 -18px; border: 1px solid rgba(255,255,255,0.9); display: grid; place-items: center; transition: width .35s var(--ease-apple), height .35s var(--ease-apple), margin .35s var(--ease-apple), background-color .35s var(--ease-apple), border-color .35s; }
+.vc-ring.is-hover { width: 64px; height: 64px; margin: -32px 0 0 -32px; background: rgba(255,255,255,1); border-color: transparent; }
+.vc-ring.is-label { width: 88px; height: 88px; margin: -44px 0 0 -44px; }
+.vc-label { font-size: 12px; font-weight: 600; letter-spacing: -0.01em; color: #000; opacity: 0; transition: opacity .2s; white-space: nowrap; }
+.vc-ring.is-label .vc-label { opacity: 1; }
+
+/* Theatre chapters */
+.theatre { background: var(--theatre); color: #fff; }
+.theatre .t-2 { color: var(--theatre-ink-2); }
+.theatre .t-3 { color: var(--theatre-ink-3); }
+.film-grain::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; opacity: .05; mix-blend-mode: overlay;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+.text-gradient-blue { background: linear-gradient(90deg, #2997FF 0%, #64B5FF 45%, #A1D1FF 100%); -webkit-background-clip: text; background-clip: text; color: transparent; }
+.split-line { overflow: hidden; padding-bottom: 0.08em; margin-bottom: -0.08em; }
+
+/* Device frame for the product reveal */
+.device { border-radius: 28px; padding: 10px; background: linear-gradient(145deg, #2A2A2E, #0E0E10); box-shadow: 0 0 0 1px rgba(255,255,255,0.08), 0 60px 120px -30px rgba(0,113,227,0.35), 0 40px 80px -20px rgba(0,0,0,0.6); }
+.device-screen { border-radius: 20px; overflow: hidden; background: #F5F5F7; }
+
+/* Marquee */
+@keyframes vela-marquee { from { transform: translateX(0) } to { transform: translateX(-50%) } }
+.marquee-track { display: flex; width: max-content; animation: vela-marquee 38s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .marquee-track { animation: none; }
+}

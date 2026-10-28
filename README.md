@@ -1,73 +1,77 @@
-# React + TypeScript + Vite
+# VELA
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Hospital operations platform: reception and queueing, doctor workspace with the
+Atlas voice assistant, lab orders and reports, admissions and discharge, a
+hospital manager console, and a patient portal.
 
-Currently, two official plugins are available:
+- **Frontend:** React 19 + TypeScript + Vite (`src/`)
+- **Backend:** FastAPI + Socket.IO (`medisense/medisense-ai/`)
+- **Data:** Supabase (Postgres + Auth) plus a local SQLite file for sessions,
+  the audit log, lab orders and admissions (`vela_local.db`)
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Run it
 
-## React Compiler
+```bash
+# Backend
+cd medisense/medisense-ai
+cp .env.example .env            # fill in Supabase, OpenAI, ElevenLabs, owner login
+python -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
+.venv/bin/uvicorn main:app --port 8000
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+# Frontend (repo root)
+cp .env.example .env            # VITE_* values only — they ship to the browser
+npm install
+npm run dev
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Before the first real deployment, run `medisense/medisense-ai/rls_lockdown.sql`
+in the Supabase SQL editor (see "Security model").
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Tests
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+cd medisense/medisense-ai
+.venv/bin/python -m pip install -r requirements-dev.txt
+.venv/bin/python -m pytest tests
 ```
+
+`tests/test_authz.py` fails if any route is missing from the access policy.
+
+## Security model
+
+- **Sessions.** Every login returns a bearer token. Tokens are stored as SHA-256
+  hashes in `vela_local.db`, survive restarts, and are revoked on logout
+  (`POST /api/auth/logout`). Staff sessions last 12 hours, patient sessions 30
+  days (`VELA_SESSION_TTL`, `VELA_PATIENT_SESSION_TTL`).
+- **Authorization.** `authz.py` runs on every route. Each route lists the roles
+  that may call it. Patients can only reach their own records, and
+  hospital-bound staff can only reach their own hospital's records. Routes not
+  in the policy are refused.
+- **Database.** The backend uses only the Supabase service-role key. RLS is on
+  for every table with no anon policies, so the anon key in the browser (used
+  for Supabase Auth only) can't read or write any table.
+- **Realtime.** Socket.IO connections must present a session token. Events go
+  only to the hospital's room or the patient's own room, never to everyone.
+- **Secrets.** Nothing secret goes in a `VITE_*` variable. ElevenLabs is
+  proxied through `POST /api/tts`, and the owner login is a bcrypt hash in the
+  backend `.env`.
+- **Audit.** Access to patient data is written to a hash-chained `audit_log`.
+  `GET /api/audit-log/verify` reports the first row that was altered. A
+  break-glass reason can be sent in the `X-Access-Reason` header.
+- **Limits.** Login and sign-up routes are rate-limited per IP. Uploads are
+  capped at `VELA_MAX_UPLOAD_MB` (default 20 MB) and checked by file
+  signature.
+
+See `docs/AUDIT-2026-10-28.md` for the audit these controls came from, and
+for what is still open.
+
+## Landing and sign-in motion
+
+`src/pages/LandingPage.tsx` is a scroll-scrubbed product film (GSAP ScrollTrigger and SplitText, Lenis smooth
+scroll, a three.js particle field in `src/components/cinematic/`). `Login.tsx` continues it with Framer
+Motion. Everything respects `prefers-reduced-motion`: the DOM is written in its final state, and the
+animations run only when motion is allowed.
+
+The patterns are inspired by components browsed on [21st.dev](https://21st.dev): Aceternity UI's
+"Container Scroll Animation" (MIT), scroll-expansion heroes, split-screen sign-ins and follower cursors.
+They were rebuilt from scratch rather than installed, so no third-party component code is vendored.

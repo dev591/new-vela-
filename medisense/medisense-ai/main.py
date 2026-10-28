@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, Depends
 from fastapi.responses import FileResponse
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +7,8 @@ from mem0 import MemoryClient
 from supabase import create_client
 from dotenv import load_dotenv
 from crew_agents import run_crew_analysis
+import authz
+from authz import scoped_hospital_id
 import socketio
 import asyncio
 import os, base64, json, fitz, hashlib, requests, re, secrets, string, sqlite3, uuid, time
@@ -62,11 +64,39 @@ class AmbientConsultApproveRequest(BaseModel):
 load_dotenv()
 
 # ── LOCAL SQLITE DATABASE FALLBACK FOR MISSING SCHEMAS ──
-LOCAL_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "vela_local.db")
+LOCAL_DB_PATH = os.getenv("VELA_LOCAL_DB") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "vela_local.db")
 
 def init_local_db():
     conn = sqlite3.connect(LOCAL_DB_PATH)
     cursor = conn.cursor()
+
+    # 0. audit_log — who touched patient data, when (HIPAA-style access trail)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS audit_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts TEXT DEFAULT CURRENT_TIMESTAMP,
+        role TEXT, actor TEXT, staff_id TEXT, hospital_id TEXT,
+        method TEXT, path TEXT, status INTEGER, ip TEXT
+    )
+    """)
+    # Tamper evidence: every row stores the hash of the row before it, so an
+    # edited or deleted entry breaks the chain (see /api/audit-log/verify).
+    for col in ("reason TEXT", "prev_hash TEXT", "row_hash TEXT"):
+        try:
+            cursor.execute(f"ALTER TABLE audit_log ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # column already there
+
+    # Session tokens survive a restart and can be revoked on logout. Only a
+    # SHA-256 of the token is stored, so a copy of this file can't be replayed.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS sessions (
+        token_hash TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        issued REAL NOT NULL,
+        expires REAL NOT NULL
+    )
+    """)
     
     # 1. admissions table
     cursor.execute("""
@@ -322,6 +352,11 @@ def init_local_db():
     conn.close()
     print("🤖 Local SQLite database initialized successfully!")
 
+class _LocalRows:
+    """Wraps local SQLite rows so they read like a Supabase response (`.data`)."""
+    def __init__(self, data):
+        self.data = data
+
 def local_query(query, params=()):
     conn = sqlite3.connect(LOCAL_DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -526,12 +561,83 @@ ALLOWED_ORIGINS = [
     "https://www.velahealth.in",
 ] + [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 
-sio = socketio.AsyncServer(
+class ScopedAsyncServer(socketio.AsyncServer):
+    """Socket.IO server that never broadcasts to everyone.
+
+    Every client authenticates on connect and is placed in the rooms its
+    session allows (see connect() below). An emit without an explicit room is
+    routed from its payload and the current request's session: the hospital's
+    room, the patient's own room, or — when neither can be determined — the
+    signed-in staff room. Patient data never reaches an unauthenticated socket
+    or another patient.
+    """
+
+    async def emit(self, event, data=None, to=None, room=None, **kwargs):
+        target = to if to is not None else room
+        if target is not None:
+            return await super().emit(event, data, to=_normalize_room(target), **kwargs)
+        for target in _rooms_for_payload(event, data):
+            await super().emit(event, data, to=target, **kwargs)
+        if event == "queue_updated":
+            # Patients waiting in a queue refetch their own position on this;
+            # they get the nudge, not the payload.
+            await super().emit(event, {}, to="patients", **kwargs)
+
+
+def _normalize_room(room):
+    if isinstance(room, (list, tuple)):
+        return [_normalize_room(r) for r in room]
+    room = str(room)
+    if room.startswith("hospital_"):
+        return "hospital:" + room[len("hospital_"):]
+    if is_valid_uuid(room):  # older call sites pass a bare hospital id
+        return "hospital:" + room
+    return room
+
+
+def _rooms_for_payload(event, data) -> list:
+    payload = data if isinstance(data, dict) else {}
+    session = authz.current_session.get() or {}
+    rooms = []
+    hid = payload.get("hospital_id")
+    hid = hid if is_valid_uuid(hid) else session.get("hospital_id")
+    if hid:
+        rooms.append(f"hospital:{hid}")
+    lab = payload.get("network_lab_id") or session.get("network_lab_id")
+    if lab:
+        rooms.append(f"network_lab:{lab}")
+    if session.get("network_doctor_id"):
+        rooms.append(f"network_doctor:{session['network_doctor_id']}")
+    if not rooms:
+        rooms.append("staff")
+    pid = payload.get("patient_id")
+    if pid:
+        rooms.append(f"patient:{pid}")
+    return rooms
+
+
+def _rooms_for_session(session: dict) -> list:
+    role = session.get("role")
+    if role == "patient":
+        return [f"patient:{session.get('staff_id')}", "patients"]
+    rooms = ["staff"]
+    if session.get("hospital_id"):
+        rooms.append(f"hospital:{session['hospital_id']}")
+    if session.get("network_lab_id"):
+        rooms.append(f"network_lab:{session['network_lab_id']}")
+    if session.get("network_doctor_id"):
+        rooms.append(f"network_doctor:{session['network_doctor_id']}")
+    return rooms
+
+
+sio = ScopedAsyncServer(
     async_mode="asgi",
     cors_allowed_origins=ALLOWED_ORIGINS
 )
 
-fastapi_app = FastAPI()
+# authz.authorize runs on every route (including receptionist.py's router)
+# and enforces the role / ownership / hospital policy in authz.py.
+fastapi_app = FastAPI(dependencies=[Depends(authz.authorize)])
 fastapi_app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -585,6 +691,28 @@ def _cors_headers(request: _Request) -> dict:
         }
     return {}
 
+def error_ref(e: BaseException) -> str:
+    """Log an exception server-side and return a short reference for the client.
+
+    Clients see "… (ref 3fa9c2)" instead of the raw exception text, which can
+    carry SQL, file paths or library internals; support greps the log for it.
+    """
+    ref = secrets.token_hex(3)
+    print(f"❌ [ref {ref}] {type(e).__name__}: {e}")
+    return ref
+
+from fastapi import HTTPException as _HTTPException
+
+@fastapi_app.exception_handler(_HTTPException)
+async def _http_exception_handler(request: _Request, exc: _HTTPException):
+    # Same {"status", "message"} shape every handler returns, so the frontend's
+    # existing `data.message` error display works for 403s from authz too.
+    return _JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "error", "message": exc.detail},
+        headers=_cors_headers(request),
+    )
+
 @fastapi_app.exception_handler(Exception)
 async def _unhandled_exception_handler(request: _Request, exc: Exception):
     # Full detail stays server-side; the client gets a generic message so
@@ -600,13 +728,16 @@ async def _unhandled_exception_handler(request: _Request, exc: Exception):
 
 # ── AUTH ──
 # Every /api/* route requires a Bearer session token except the public
-# allowlist below. Tokens are issued by /api/auth/login (staff demo accounts,
-# bcrypt-verified server-side) and /api/network/auth/login, kept in memory
-# with a TTL — a restart simply logs everyone out. Set VELA_AUTH_DISABLED=1
-# only for local development.
+# allowlist below; authz.py then decides whether that session may call the
+# matched route on the named record. Tokens are stored (as SHA-256 hashes) in
+# the local `sessions` table, so a restart keeps people signed in and logout
+# really revokes the token. Set VELA_AUTH_DISABLED=1 only for local
+# development — it is refused when DEMO_LOGIN is off, i.e. outside a demo box.
 AUTH_DISABLED = os.getenv("VELA_AUTH_DISABLED", "").lower() in ("1", "true", "yes")
 SESSION_TTL_SECONDS = int(os.getenv("VELA_SESSION_TTL", 12 * 3600))
-_SESSION_TOKENS: dict = {}  # token -> {"role", "name", "staff_id", "issued"}
+# Patients stay signed in until they sign out (portal principle), bounded so a
+# forgotten shared-PC session doesn't live forever.
+PATIENT_SESSION_TTL_SECONDS = int(os.getenv("VELA_PATIENT_SESSION_TTL", 30 * 24 * 3600))
 
 PUBLIC_API_PATHS = {
     "/api/network/auth/login",
@@ -615,6 +746,7 @@ PUBLIC_API_PATHS = {
     "/api/staff/login",
     "/api/manager/login",
     "/api/owner/login",
+    "/api/patient/login",
     "/api/health",
     # Patient self-signup: the caller has no session yet by definition. The
     # route itself refuses to set staff-only clinical fields.
@@ -633,8 +765,12 @@ DEMO_LOGIN_ENABLED = (os.getenv("DEMO_LOGIN", "false").strip().lower()
 if DEMO_LOGIN_ENABLED:
     print("⚠️  DEMO_LOGIN is ON — /api/demo/login-patient grants a patient "
           "session without a password. Set DEMO_LOGIN=false before deploying.")
+if AUTH_DISABLED:
+    print("⚠️  VELA_AUTH_DISABLED is ON — every route is open. Local development only.")
+fastapi_app.state.auth_disabled = AUTH_DISABLED
 
 import hmac
+import threading
 
 def hash_password(plaintext: str) -> str:
     return bcrypt.hashpw(plaintext.encode(), bcrypt.gensalt()).decode()
@@ -651,12 +787,17 @@ def verify_password(plaintext: str, stored: str) -> bool:
             return False
     return hmac.compare_digest(stored, plaintext)
 
+def _token_hash(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
 def issue_session_token(
     role: str, name: str, staff_id: str = "", lab_department: str = "", hospital_id: str = "",
-    network_lab_id: str = "", network_doctor_id: str = "",
+    network_lab_id: str = "", network_doctor_id: str = "", vela_id: str = "", email: str = "",
 ) -> str:
     token = secrets.token_urlsafe(32)
-    _SESSION_TOKENS[token] = {
+    now = time.time()
+    session = {
+        # For a patient session staff_id is the patient's own id.
         "role": role, "name": name, "staff_id": staff_id,
         # Scopes a lab account to one department's queue. Empty means "all
         # departments" — the super-lab view.
@@ -668,13 +809,186 @@ def issue_session_token(
         # or solo doctor session, never both, never alongside hospital_id.
         "network_lab_id": network_lab_id,
         "network_doctor_id": network_doctor_id,
-        "issued": time.time(),
+        # Patient identity beyond the id, for routes keyed by VELA ID / email.
+        "vela_id": vela_id,
+        "email": email,
+        "issued": now,
     }
+    ttl = PATIENT_SESSION_TTL_SECONDS if role == "patient" else SESSION_TTL_SECONDS
+    local_execute(
+        "INSERT INTO sessions (token_hash, data, issued, expires) VALUES (?, ?, ?, ?)",
+        (_token_hash(token), json.dumps(session), now, now + ttl),
+    )
     return token
+
+def lookup_session(token: str) -> Optional[dict]:
+    if not token:
+        return None
+    rows = local_query("SELECT data, expires FROM sessions WHERE token_hash = ?", (_token_hash(token),))
+    if not rows:
+        return None
+    if rows[0]["expires"] < time.time():
+        revoke_session(token)
+        return None
+    return json.loads(rows[0]["data"])
+
+def revoke_session(token: str) -> None:
+    if token:
+        local_execute("DELETE FROM sessions WHERE token_hash = ?", (_token_hash(token),))
+
+def _purge_expired_sessions() -> None:
+    try:
+        local_execute("DELETE FROM sessions WHERE expires < ?", (time.time(),))
+    except Exception as e:
+        print(f"⚠️ session purge failed: {e}")
+
+_purge_expired_sessions()
+
+def _bearer(request) -> str:
+    auth_header = request.headers.get("authorization", "")
+    return auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
+
+# ── Background tasks ──
+# asyncio only keeps a weak reference to a task, so a fire-and-forget
+# create_task() can be garbage-collected mid-run. spawn() holds the reference
+# until the task finishes and logs anything it raised.
+_BACKGROUND_TASKS: set = set()
+
+def spawn(coro) -> "asyncio.Task":
+    task = asyncio.get_running_loop().create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    def _done(t):
+        _BACKGROUND_TASKS.discard(t)
+        if not t.cancelled() and t.exception() is not None:
+            print(f"⚠️ background task failed: {type(t.exception()).__name__}: {t.exception()}")
+    task.add_done_callback(_done)
+    return task
+
+# ── Login rate limiting ──
+# Sliding window per client IP and route. In-memory is enough for one
+# process; a multi-instance deployment should put this in Redis or the proxy.
+LOGIN_RATE_LIMIT = int(os.getenv("VELA_LOGIN_RATE_LIMIT", 10))      # attempts
+LOGIN_RATE_WINDOW = int(os.getenv("VELA_LOGIN_RATE_WINDOW", 300))   # seconds
+_RATE_LIMITED_PATHS = {p for p in PUBLIC_API_PATHS if p != "/api/health"}
+_rate_hits: dict = defaultdict(list)
+TRUST_PROXY = os.getenv("VELA_TRUST_PROXY", "").lower() in ("1", "true", "yes")
+
+def client_ip(request) -> str:
+    if TRUST_PROXY:
+        fwd = request.headers.get("x-forwarded-for", "")
+        if fwd:
+            return fwd.split(",")[0].strip()
+    return request.client.host if request.client else ""
+
+def _rate_limited(request) -> bool:
+    key = (client_ip(request), request.url.path)
+    now = time.time()
+    hits = [t for t in _rate_hits[key] if now - t < LOGIN_RATE_WINDOW]
+    hits.append(now)
+    _rate_hits[key] = hits
+    if len(_rate_hits) > 10000:  # keep memory bounded under a spray of IPs
+        for k in [k for k, v in _rate_hits.items() if not v or now - v[-1] > LOGIN_RATE_WINDOW]:
+            _rate_hits.pop(k, None)
+    return len(hits) > LOGIN_RATE_LIMIT
+
+# ── Audit log ──
+_PHI_PREFIXES = (
+    "/api/patients", "/api/patient/", "/api/atlas", "/api/documents", "/api/upload", "/api/lab/",
+    "/api/emergency", "/api/voice", "/api/imaging", "/api/admissions", "/api/discharge",
+    "/api/history", "/api/receptionist/lookup", "/api/visit-report", "/api/appointments/patient",
+)
+
+def _is_phi_path(path: str) -> bool:
+    return path.startswith(_PHI_PREFIXES)
+
+_AUDIT_LOCK = threading.Lock()
+_AUDIT_FIELDS = ("ts", "role", "actor", "staff_id", "hospital_id", "method", "path", "status", "ip", "reason", "prev_hash")
+
+def _audit_row_hash(row: dict) -> str:
+    return hashlib.sha256(json.dumps([row.get(f) for f in _AUDIT_FIELDS], default=str).encode()).hexdigest()
+
+def _write_audit(session: dict, method: str, path: str, status: int, ip: str, reason: str) -> None:
+    """Best-effort, hash-chained access log; never lets a logging failure break a request."""
+    try:
+        with _AUDIT_LOCK:
+            conn = sqlite3.connect(LOCAL_DB_PATH)
+            last = conn.execute("SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1").fetchone()
+            row = {
+                "ts": datetime.utcnow().isoformat(timespec="seconds"),
+                "role": session.get("role"), "actor": session.get("name"),
+                "staff_id": session.get("staff_id"), "hospital_id": session.get("hospital_id"),
+                "method": method, "path": path, "status": status, "ip": ip,
+                "reason": reason or None, "prev_hash": (last[0] if last else None) or "",
+            }
+            row["row_hash"] = _audit_row_hash(row)
+            cols = list(row)
+            conn.execute(
+                f"INSERT INTO audit_log ({', '.join(cols)}) VALUES ({', '.join('?' for _ in cols)})",
+                tuple(row[c] for c in cols),
+            )
+            conn.commit()
+            conn.close()
+    except Exception as e:
+        print(f"⚠️ audit log write failed: {e}")
+
+def _audit_scope_clause(session: dict):
+    """Managers see their own hospital's trail; the Vela owner sees all of it."""
+    if session.get("role") == "vela_owner":
+        return "", ()
+    return " WHERE hospital_id = ?", (session.get("hospital_id") or "",)
+
+@fastapi_app.get("/api/audit-log")
+def get_audit_log(request: _Request, limit: int = 100):
+    """Recent patient-data access (who, what, when, and any break-glass reason)."""
+    where, params = _audit_scope_clause(getattr(request.state, "session", None) or {})
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = [dict(r) for r in conn.execute(
+        f"SELECT * FROM audit_log{where} ORDER BY id DESC LIMIT ?", params + (max(1, min(limit, 500)),))]
+    conn.close()
+    return {"status": "success", "entries": rows}
+
+@fastapi_app.get("/api/audit-log/verify")
+def verify_audit_log():
+    """Recompute the hash chain; reports the first row that was altered or removed."""
+    conn = sqlite3.connect(LOCAL_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    prev = None
+    checked = 0
+    for r in conn.execute("SELECT * FROM audit_log ORDER BY id"):
+        r = dict(r)
+        if r.get("row_hash") is None:
+            continue  # rows written before chaining existed
+        if prev is not None and r.get("prev_hash") != prev:
+            conn.close()
+            return {"status": "broken", "row_id": r["id"], "checked": checked}
+        if _audit_row_hash(r) != r["row_hash"]:
+            conn.close()
+            return {"status": "broken", "row_id": r["id"], "checked": checked}
+        prev = r["row_hash"]
+        checked += 1
+    conn.close()
+    return {"status": "intact", "checked": checked}
 
 @fastapi_app.middleware("http")
 async def _require_auth(request: _Request, call_next):
     path = request.url.path
+    if request.method == "POST" and path in _RATE_LIMITED_PATHS and _rate_limited(request):
+        return _JSONResponse(
+            status_code=429,
+            content={"status": "error", "message": "Too many attempts. Please wait a few minutes and try again."},
+            headers=_cors_headers(request),
+        )
+    try:
+        declared = int(request.headers.get("content-length") or 0)
+    except ValueError:
+        declared = 0
+    if declared > MAX_UPLOAD_BYTES + 1024 * 1024:
+        return _JSONResponse(
+            status_code=413,
+            content={"status": "error", "message": "That upload is too large."},
+            headers=_cors_headers(request),
+        )
     if (
         AUTH_DISABLED
         or request.method == "OPTIONS"
@@ -682,12 +996,7 @@ async def _require_auth(request: _Request, call_next):
         or path in PUBLIC_API_PATHS
     ):
         return await call_next(request)
-    auth_header = request.headers.get("authorization", "")
-    token = auth_header[7:] if auth_header.lower().startswith("bearer ") else ""
-    session = _SESSION_TOKENS.get(token)
-    if session and time.time() - session["issued"] > SESSION_TTL_SECONDS:
-        _SESSION_TOKENS.pop(token, None)
-        session = None
+    session = await asyncio.to_thread(lookup_session, _bearer(request))
     if not session:
         return _JSONResponse(
             status_code=401,
@@ -695,7 +1004,28 @@ async def _require_auth(request: _Request, call_next):
             headers=_cors_headers(request),
         )
     request.state.session = session
-    return await call_next(request)
+    authz.current_session.set(session)
+    response = await call_next(request)
+    if _is_phi_path(path):
+        # Break-glass: a clinician opening a record outside the normal flow
+        # (e.g. an emergency) sends X-Access-Reason, which is kept in the trail.
+        reason = (request.headers.get("x-access-reason") or "")[:300]
+        spawn(asyncio.to_thread(_write_audit, session, request.method, path,
+                                response.status_code, client_ip(request), reason))
+    return response
+
+@fastapi_app.post("/api/auth/logout")
+@fastapi_app.post("/api/staff/logout")
+def logout_session(request: _Request):
+    """Revoke the caller's token and, for staff, mark them offline."""
+    session = getattr(request.state, "session", None) or {}
+    revoke_session(_bearer(request))
+    if session.get("role") not in ("patient", "vela_owner") and session.get("staff_id"):
+        try:
+            supabase_admin.table("vela_staff").update({"online": False}).eq("id", session["staff_id"]).execute()
+        except Exception as e:
+            print(f"⚠️ marking staff offline failed: {e}")
+    return {"status": "success"}
 
 @fastapi_app.post("/api/demo/login-patient")
 async def demo_login_patient():
@@ -714,8 +1044,21 @@ async def demo_login_patient():
         return _JSONResponse(status_code=404,
                              content={"status": "error", "message": "Not found"})
 
-    seeded = await asyncio.to_thread(seed_demo_patient)
-    patient = (seeded or {}).get("patient")
+    # The demo login must not fail on stage: retry transient database errors, and if the
+    # database stays unreachable fall back to the last patient we loaded successfully.
+    patient = None
+    for attempt in range(3):
+        try:
+            seeded = await asyncio.to_thread(seed_demo_patient)
+            patient = (seeded or {}).get("patient")
+        except Exception as e:
+            print(f"⚠️ demo login attempt {attempt + 1} failed: {e}")
+        if patient:
+            _DEMO_PATIENT_CACHE["patient"] = patient
+            break
+        await asyncio.sleep(0.4 * (attempt + 1))
+    if not patient:
+        patient = _DEMO_PATIENT_CACHE.get("patient")
     if not patient:
         return _JSONResponse(
             status_code=503,
@@ -723,7 +1066,8 @@ async def demo_login_patient():
                      "message": "Demo patient unavailable — check the Supabase connection."},
         )
 
-    token = issue_session_token("patient", patient.get("name") or "Rajesh Kumar", patient.get("id") or "")
+    token = issue_session_token("patient", patient.get("name") or "Rajesh Kumar", patient.get("id") or "",
+                                vela_id=patient.get("vela_id") or "", email=patient.get("email") or "")
     return {
         "status": "success",
         "token": token,
@@ -737,6 +1081,49 @@ async def demo_login_patient():
 @fastapi_app.get("/api/health")
 def api_health():
     return {"status": "ok"}
+
+# ── TEXT TO SPEECH (Atlas voice) ──
+# The ElevenLabs key lives here, not in the browser bundle: the frontend posts
+# the text and gets the audio stream back through this proxy.
+ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY") or ""
+ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID") or "21m00Tcm4TlvDq8ikWAM"
+TTS_MAX_CHARS = 2500
+
+@fastapi_app.post("/api/tts")
+async def text_to_speech(data: dict):
+    text = (data.get("text") or "").strip()[:TTS_MAX_CHARS]
+    if not text:
+        return _JSONResponse(status_code=400, content={"status": "error", "message": "Nothing to say"})
+    if not ELEVENLABS_API_KEY:
+        # The client falls back to the browser's own voice on any non-200.
+        return _JSONResponse(status_code=503, content={"status": "error", "message": "Voice service not configured"})
+    client = _httpx.AsyncClient(timeout=_httpx.Timeout(30.0, connect=5.0))
+    upstream = await client.send(client.build_request(
+        "POST",
+        f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream",
+        headers={"xi-api-key": ELEVENLABS_API_KEY, "Accept": "audio/mpeg"},
+        json={
+            "text": text,
+            "model_id": "eleven_turbo_v2",
+            "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "style": 0.1, "use_speaker_boost": False},
+            "optimize_streaming_latency": 3,
+        },
+    ), stream=True)
+    if upstream.status_code != 200:
+        print(f"⚠️ ElevenLabs returned {upstream.status_code}")
+        await upstream.aclose()
+        await client.aclose()
+        return _JSONResponse(status_code=502, content={"status": "error", "message": "Voice service unavailable"})
+
+    async def _audio():
+        try:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
+        finally:
+            await upstream.aclose()
+            await client.aclose()
+
+    return StreamingResponse(_audio(), media_type="audio/mpeg")
 
 mem0_client = None
 # mem0 held stale values that no uploaded file contains (e.g. creatinine 1.8, Hb 9.2),
@@ -768,10 +1155,19 @@ def _make_supabase(key: str):
         options=_ClientOptions(httpx_client=_httpx.Client(timeout=5.0)),
     )
 
-supabase = _make_supabase(os.getenv("SUPABASE_ANON_KEY"))
-# Administrative client to bypass RLS for owner actions
-service_role_key = os.getenv("SUPABASE_SERVICE_ROLE_KEY") or os.getenv("SUPABASE_ANON_KEY")
-supabase_admin = _make_supabase(service_role_key)
+# The backend is the only thing that talks to the tables, and it does its own
+# authorization (authz.py), so it uses the service-role key. RLS is enabled on
+# every table with no anon policies (rls_lockdown.sql), which means the anon
+# key that ships to browsers for Supabase Auth can read or write nothing.
+_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+if not _SERVICE_ROLE_KEY:
+    raise RuntimeError(
+        "SUPABASE_SERVICE_ROLE_KEY is not set. With RLS on, the anon key can't "
+        "read any table, so the backend refuses to start without it."
+    )
+supabase_admin = _make_supabase(_SERVICE_ROLE_KEY)
+# Older code paths still say `supabase`; it is the same service client.
+supabase = supabase_admin
 
 # ── DIAGNOSTIC ENGINE ASSETS ──
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -837,32 +1233,48 @@ def predict_disease(data: dict):
                 "disease": str(disease_encoder.inverse_transform([i])[0]),
                 "probability": float(probs[i])
             })
-        return {"status": "success", "predictions": results}
+        return {
+            "status": "success",
+            "predictions": results,
+            # Trained on a public symptom dataset with a 42-case test split; the
+            # accuracy figure is not clinical validation. Callers must show this.
+            "disclaimer": "Demo model for illustration only — not a diagnosis.",
+        }
     except Exception as e:
-        return {"status": "error", "message": f"Prediction failed: {str(e)}"}
+        return {"status": "error", "message": f"Prediction failed (ref {error_ref(e)})"}
 
 # ── SOCKET.IO ──
 @sio.event
-async def connect(sid, environ):
-    print(f"✅ Frontend connected: {sid}")
+async def connect(sid, environ, auth=None):
+    token = auth.get("token") if isinstance(auth, dict) else None
+    session = await asyncio.to_thread(lookup_session, token or "")
+    if not session:
+        if not AUTH_DISABLED:
+            raise socketio.exceptions.ConnectionRefusedError("authentication required")
+        session = {}
+    await sio.save_session(sid, session)
+    for room in _rooms_for_session(session):
+        await sio.enter_room(sid, room)
 
 @sio.event
-async def disconnect(sid):
-    print(f"❌ Frontend disconnected: {sid}")
+async def disconnect(sid, *args):
+    pass
 
 @sio.on("join_hospital")
 async def on_join_hospital(sid, data):
-    hospital_id = data.get("hospital_id")
-    if hospital_id:
-        await sio.enter_room(sid, hospital_id)
-        print(f"🏥 Client {sid} joined room {hospital_id}")
+    # Kept for older clients: rooms are assigned on connect from the session,
+    # so this can only ever (re)join the caller's own hospital.
+    session = await sio.get_session(sid)
+    if session.get("hospital_id"):
+        await sio.enter_room(sid, f"hospital:{session['hospital_id']}")
 
 @sio.on("doctor_state")
 async def on_doctor_state(sid, data):
-    hospital_id = data.get("hospital_id")
-    if hospital_id:
-        # Broadcast doctor operational state change to the whole hospital room
-        await sio.emit("doctor_state_change", data, room=hospital_id)
+    session = await sio.get_session(sid)
+    hospital_id = session.get("hospital_id")
+    if hospital_id and session.get("role") == "doctor" and isinstance(data, dict):
+        data = {**data, "hospital_id": hospital_id, "doctor_id": session.get("staff_id")}
+        await sio.emit("doctor_state_change", data, room=f"hospital:{hospital_id}")
 
 # ── HELPERS ──
 def pdf_to_base64_images(file_bytes):
@@ -1112,6 +1524,49 @@ def generate_password(length: int = 10) -> str:
 
 # ── ROUTES ──
 
+# ── Upload limits ──
+MAX_UPLOAD_BYTES = int(os.getenv("VELA_MAX_UPLOAD_MB", 20)) * 1024 * 1024
+# Checked against the file's first bytes, not its name or claimed type, so a
+# renamed executable or a crafted blob never reaches fitz / PIL / the LLM.
+_UPLOAD_SIGNATURES = {
+    "pdf": (b"%PDF-",),
+    "png": (b"\x89PNG\r\n\x1a\n",),
+    "jpg": (b"\xff\xd8\xff",), "jpeg": (b"\xff\xd8\xff",),
+    "webp": (b"RIFF",),
+    "bmp": (b"BM",),
+    "tif": (b"II*\x00", b"MM\x00*"), "tiff": (b"II*\x00", b"MM\x00*"),
+}
+
+class UploadRejected(Exception):
+    pass
+
+async def read_upload(file: UploadFile, allowed=("pdf", "png", "jpg", "jpeg", "webp")) -> bytes:
+    """Read an upload with a hard size cap and a content-signature check."""
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower() if "." in (file.filename or "") else ""
+    if ext not in allowed:
+        raise UploadRejected(f"Please upload a {', '.join(sorted(set(allowed)))} file.")
+    chunks, total = [], 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise UploadRejected(f"That file is too large (limit {MAX_UPLOAD_BYTES // (1024 * 1024)} MB).")
+        chunks.append(chunk)
+    data = b"".join(chunks)
+    if not data:
+        raise UploadRejected("That file is empty.")
+    if ext == "dcm":
+        ok = data[128:132] == b"DICM"
+    else:
+        ok = any(data.startswith(sig) for sig in _UPLOAD_SIGNATURES.get(ext, ()))
+        if ext == "webp":
+            ok = ok and data[8:12] == b"WEBP"
+    if not ok:
+        raise UploadRejected("That file doesn't look like the type its name says.")
+    return data
+
 # --- PATIENTS ---
 @fastapi_app.get("/api/patient/qr/{vela_id}")
 def get_patient_qr(vela_id: str):
@@ -1204,6 +1659,150 @@ async def update_patient(patient_id: str, request: Request):
     _LIVE_DOCS_CACHE.pop(patient_id, None)
     return {"status": "success", "patient": result.data[0]}
 
+@fastapi_app.post("/api/patient/{patient_id}/revisit")
+async def patient_revisit(patient_id: str, request: Request):
+    """Patient taps "See the doctor about my results": join the same doctor's queue directly,
+    without booking or going through reception. Reuses the normal arrival flow so the ticket,
+    the doctor's live queue and the next-patient pre-cache all behave exactly as for a check-in."""
+    sess = getattr(request.state, "session", None) or {}
+    if sess.get("role") == "patient" and sess.get("staff_id") and sess.get("staff_id") != patient_id:
+        return _JSONResponse(status_code=403, content={"status": "error", "message": "You can only do this for yourself"})
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    reason = (body.get("reason") or "Follow-up: lab results ready").strip()[:200] if isinstance(body, dict) else "Follow-up: lab results ready"
+
+    def _active_ticket():
+        r = supabase_admin.table("tickets").select("*").eq("patient_id", patient_id).in_("status", ["waiting", "in-progress"]).order("created_at", desc=True).limit(1).execute()
+        return r.data[0] if r.data else None
+
+    def _people_ahead(ticket):
+        if ticket.get("status") != "waiting":
+            return 0
+        q = supabase_admin.table("tickets").select("id").eq("status", "waiting").lt("queue_position", ticket["queue_position"])
+        if ticket.get("doctor_id"):
+            q = q.eq("doctor_id", ticket["doctor_id"])
+        return len(q.execute().data or [])
+
+    def _doctor_name(did):
+        if not did:
+            return "your doctor"
+        r = supabase_admin.table("vela_staff").select("name").eq("id", did).execute()
+        return (r.data[0]["name"] if r.data else "your doctor")
+
+    # Already waiting or with the doctor? Don't create a duplicate — just report where they are.
+    active = await asyncio.to_thread(_active_ticket)
+    if active:
+        ahead = await asyncio.to_thread(_people_ahead, active)
+        return {"status": "success", "already_in_queue": True, "ticket_number": active["ticket_number"],
+                "queue_position": ahead + 1, "people_ahead": ahead, "doctor_name": await asyncio.to_thread(_doctor_name, active.get("doctor_id"))}
+
+    # Same doctor who saw them last; otherwise a doctor at the hospital that ran their tests.
+    def _pick_doctor():
+        last = supabase_admin.table("tickets").select("doctor_id").eq("patient_id", patient_id).order("created_at", desc=True).limit(1).execute()
+        did = last.data[0].get("doctor_id") if last.data else None
+        hid = None
+        if did:
+            st = supabase_admin.table("vela_staff").select("hospital_id").eq("id", did).eq("active", True).execute()
+            if st.data:
+                hid = st.data[0].get("hospital_id")
+            else:
+                did = None
+        if not did:
+            rows = local_query("SELECT hospital_id FROM test_orders WHERE patient_id = ? AND hospital_id IS NOT NULL ORDER BY ordered_at DESC LIMIT 1", (patient_id,))
+            hid = rows[0]["hospital_id"] if rows else None
+            if hid:
+                docs = supabase_admin.table("vela_staff").select("id").eq("hospital_id", hid).eq("role", "doctor").eq("active", True).order("online", desc=True).limit(1).execute()
+                did = docs.data[0]["id"] if docs.data else None
+        return did, hid
+
+    doctor_id, hospital_id = await asyncio.to_thread(_pick_doctor)
+    if not doctor_id:
+        return {"status": "error", "message": "We couldn't find your doctor right now. Please ask at the reception desk."}
+
+    def _create_appointment():
+        hosp = supabase_admin.table("vela_hospitals").select("name, address").eq("id", hospital_id).execute() if hospital_id else None
+        h = (hosp.data[0] if hosp and hosp.data else {})
+        now = datetime.now()
+        payload = json.dumps({"checklist": {}, "patient_notes": reason, "doctor_id": doctor_id, "doctor_name": _doctor_name(doctor_id)})
+        res = supabase_admin.table("appointments").insert({
+            "patient_id": patient_id, "hospital_name": h.get("name"), "hospital_address": h.get("address"),
+            "hospital_place_id": hospital_id, "date": now.strftime("%Y-%m-%d"), "time": now.strftime("%H:%M"),
+            "doctor_id": doctor_id, "status": "scheduled", "reason": payload,
+        }).execute()
+        return res.data[0] if res.data else None
+
+    appointment = await asyncio.to_thread(_create_appointment)
+    if not appointment:
+        return {"status": "error", "message": "Could not add you to the queue. Please try again."}
+
+    arrived = await mark_appointment_arrived(appointment["id"])
+    if not isinstance(arrived, dict) or arrived.get("status") != "success":
+        return {"status": "error", "message": "Could not add you to the queue. Please try again."}
+
+    # Let the doctor see why this patient is back.
+    try:
+        await asyncio.to_thread(lambda: supabase_admin.table("tickets").update({"notes": reason}).eq("ticket_number", arrived["ticket_number"]).execute())
+    except Exception as e:
+        print(f"⚠️ Warning: could not label follow-up ticket: {e}")
+
+    ticket = await asyncio.to_thread(_active_ticket)
+    ahead = await asyncio.to_thread(_people_ahead, ticket) if ticket else max(0, (arrived.get("queue_position") or 1) - 1)
+    return {"status": "success", "already_in_queue": False, "appointment_id": appointment["id"],
+            "ticket_number": arrived["ticket_number"], "queue_position": ahead + 1, "people_ahead": ahead,
+            "doctor_name": await asyncio.to_thread(_doctor_name, doctor_id)}
+
+
+def patient_session_payload(patient: dict) -> dict:
+    """Token + profile a patient client needs after signing in or signing up."""
+    token = issue_session_token(
+        "patient", patient.get("name") or "", patient.get("id") or "",
+        vela_id=patient.get("vela_id") or "", email=patient.get("email") or "",
+    )
+    return {"status": "success", "token": token, "role": "patient",
+            "vela_id": patient.get("vela_id"), "patient": patient}
+
+def _supabase_password_ok(email: str, password: str) -> bool:
+    """Check a patient's password against Supabase Auth.
+
+    A throwaway client per call, so one patient's auth state can never leak
+    into the shared clients the rest of the backend uses.
+    """
+    try:
+        client = create_client(_SUPABASE_URL, os.getenv("SUPABASE_ANON_KEY") or "")
+        res = client.auth.sign_in_with_password({"email": email, "password": password})
+        ok = bool(getattr(res, "user", None))
+        try:
+            client.auth.sign_out()
+        except Exception:
+            pass
+        return ok
+    except Exception as e:
+        # Wrong password raises AuthApiError; anything else is logged, not shown.
+        if type(e).__name__ != "AuthApiError":
+            print(f"⚠️ patient password check failed: {type(e).__name__}: {e}")
+        return False
+
+@fastapi_app.post("/api/patient/login")
+async def patient_login(data: dict):
+    email = (data.get("email") or "").strip()
+    password = data.get("password") or ""
+    if "@" not in email or not password:
+        return {"status": "error", "message": "Please enter your email and password."}
+    if not await asyncio.to_thread(_supabase_password_ok, email, password):
+        return {"status": "error", "message": "That email and password don't match."}
+    try:
+        rows = await asyncio.to_thread(
+            lambda: supabase_admin.table("patients").select("*").ilike("email", email).limit(1).execute()
+        )
+    except Exception as e:
+        print(f"⚠️ patient login lookup failed: {e}")
+        return {"status": "error", "message": "We couldn't reach your record. Please try again."}
+    if not rows.data:
+        return {"status": "error", "message": "We found your sign-in but not your health record."}
+    return patient_session_payload(rows.data[0])
+
 @fastapi_app.get("/api/patient/by-email/{email}")
 async def get_patient_by_email(email: str):
     # Runs in a thread so a slow/unreachable DB can't block the event loop;
@@ -1222,29 +1821,43 @@ async def get_patient_by_email(email: str):
 
 @fastapi_app.get("/api/patients/list")
 async def list_patients(hospital_id: Optional[str] = None):
+    hospital_id = scoped_hospital_id(hospital_id)
     def _work():
         query = supabase.table("patients").select("*")
         if hospital_id:
             try:
-                admissions = supabase.table("admissions").select("patient_id").eq("hospital_id", hospital_id).execute()
-                p_ids = [a["patient_id"] for a in admissions.data if a.get("patient_id")] if admissions.data else []
-
-                tickets = supabase.table("tickets").select("patient_id").eq("hospital_id", hospital_id).execute()
-                t_ids = [t["patient_id"] for t in tickets.data if t.get("patient_id")] if tickets.data else []
+                # Admissions live in the local database; tickets mostly carry the
+                # doctor rather than the hospital, so match on either.
+                p_ids = [a["patient_id"] for a in local_query(
+                    "SELECT patient_id FROM admissions WHERE hospital_id = ?", (hospital_id,)) if a.get("patient_id")]
+                staff = supabase.table("vela_staff").select("id").eq("hospital_id", hospital_id).execute()
+                staff_ids = [r["id"] for r in (staff.data or [])]
+                # tickets has no hospital column: a ticket belongs to the
+                # hospital of the doctor it's assigned to.
+                t_ids = []
+                if staff_ids:
+                    tickets = supabase.table("tickets").select("patient_id").in_("doctor_id", staff_ids).execute()
+                    t_ids = [t["patient_id"] for t in (tickets.data or []) if t.get("patient_id")]
 
                 all_ids = list(set(p_ids + t_ids))
                 if all_ids:
                     query = query.in_("id", all_ids)
                 else:
                     return {"status": "success", "patients": []}
-            except Exception:
-                pass
+            except Exception as e:
+                # Never fall back to the unfiltered (every hospital's) list.
+                print(f"⚠️ list_patients hospital filter failed: {e}")
+                return {"status": "error", "message": "Could not load this hospital's patients", "patients": []}
+        else:
+            # No hospital to scope to (independent doctor): never the whole table.
+            return {"status": "success", "patients": []}
         result = query.order("risk_score", desc=True).execute()
         return {"status": "success", "patients": result.data}
     return await asyncio.to_thread(_work)
 
 @fastapi_app.get("/api/patients/emergency")
 async def emergency_patients(hospital_id: Optional[str] = None):
+    hospital_id = scoped_hospital_id(hospital_id)
     from datetime import date
     today_str = date.today().isoformat()   # e.g. "2026-05-28"
 
@@ -1258,13 +1871,23 @@ async def emergency_patients(hospital_id: Optional[str] = None):
         try:
             active_tickets = (
                 supabase.table("tickets")
-                .select("patient_id")
+                .select("patient_id, doctor_id")
                 .in_("status", ["waiting", "in-progress"])
                 .gte("created_at", f"{today_str}T00:00:00")
                 .execute()
             )
+            tickets = active_tickets.data or []
+            if hospital_id:
+                # Tickets carry the doctor, not the hospital: keep this
+                # hospital's doctors' tickets and unassigned ones.
+                staff = supabase.table("vela_staff").select("id").eq("hospital_id", hospital_id).execute()
+                staff_ids = {r["id"] for r in (staff.data or [])}
+                tickets = [
+                    t for t in tickets
+                    if t.get("doctor_id") in staff_ids or not t.get("doctor_id")
+                ]
             active_patient_ids = list({
-                t["patient_id"] for t in (active_tickets.data or [])
+                t["patient_id"] for t in tickets
                 if t.get("patient_id")
             })
         except Exception:
@@ -1287,7 +1910,8 @@ async def emergency_patients(hospital_id: Optional[str] = None):
 
 @fastapi_app.get("/api/patients/search")
 def search_patients(q: str = ""):
-    q = (q or "").strip()
+    # Commas, parentheses and quotes would let the term rewrite the or() filter.
+    q = re.sub(r"[^\w\s@.\-]", "", (q or "")).strip()[:64]
     if len(q) < 2:
         return {"status": "success", "patients": []}
     try:
@@ -1472,7 +2096,7 @@ async def async_process_document_pipeline(doc_id: str, file_bytes: bytes, filena
             except Exception as e:
                 print(f"⚠️ Warning: RAG processing failed for doc {doc_id}: {e}")
 
-        for _t in (asyncio.create_task(_mem0_sync()), asyncio.create_task(_rag_index())):
+        for _t in (spawn(_mem0_sync()), spawn(_rag_index())):
             _bg_tasks.add(_t)
             _t.add_done_callback(_bg_tasks.discard)
 
@@ -1678,8 +2302,10 @@ async def upload_document(
     patient_id: str = Form(...)
 ):
     try:
-        # 1. Read file bytes instantly
-        file_bytes = await file.read()
+        try:
+            file_bytes = await read_upload(file)
+        except UploadRejected as e:
+            return _JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
         today_str = datetime.utcnow().strftime("%Y-%m-%d")
 
         # 2. Write a skeleton row into the documents table immediately in a background thread
@@ -1703,7 +2329,7 @@ async def upload_document(
         inserted_doc = doc_result.data[0]
 
         # 3. Instantly spawn the heavy background worker
-        asyncio.create_task(async_process_document_pipeline(doc_id, file_bytes, file.filename, patient_id))
+        spawn(async_process_document_pipeline(doc_id, file_bytes, file.filename, patient_id))
 
         # 4. Return instant 200 OK success response in <15ms
         return {
@@ -1714,7 +2340,7 @@ async def upload_document(
         }
     except Exception as e:
         print(f"⚠️ Error in fire-and-forget document upload: {e}")
-        return {"status": "error", "message": f"Upload failed: {str(e)}"}
+        return {"status": "error", "message": f"Upload failed (ref {error_ref(e)})"}
 
 @fastapi_app.delete("/api/upload/document/{doc_id}")
 async def delete_document(doc_id: str):
@@ -1734,13 +2360,13 @@ async def delete_document(doc_id: str):
         )
 
         # 3. Spawn all active ticket scans and lookahead cache invalidations in the background
-        asyncio.create_task(async_process_document_deletion_pipeline(doc_id, patient_id))
+        spawn(async_process_document_deletion_pipeline(doc_id, patient_id))
 
         # 4. Instantly return success to the client in <20ms!
         return {"status": "success", "message": "Document deleted successfully"}
     except Exception as e:
         print(f"⚠️ Error in fire-and-forget document deletion: {e}")
-        return {"status": "error", "message": f"Delete failed: {str(e)}"}
+        return {"status": "error", "message": f"Delete failed (ref {error_ref(e)})"}
 
 
 # --- RADIOLOGY IMAGING SECOND READ (X-ray / CT / MRI / Ultrasound) ---
@@ -1913,14 +2539,17 @@ async def analyze_imaging(
     they have to poll for would be worse UX than a ~15s wait with a spinner.
     """
     try:
-        file_bytes = await file.read()
+        try:
+            file_bytes = await read_upload(file, allowed=("pdf", "png", "jpg", "jpeg", "webp", "bmp", "tif", "tiff"))
+        except UploadRejected as e:
+            return _JSONResponse(status_code=400, content={"status": "error", "message": str(e)})
         filename = file.filename or "study.jpg"
 
         try:
             images = await bg_run(doc_ocr.render_document_to_images, file_bytes, filename)
         except Exception as e:
             return {"status": "error",
-                    "message": f"Could not read this file as an image or PDF: {e}"}
+                    "message": f"Could not read this file as an image or PDF (ref {error_ref(e)})"}
         if not images:
             return {"status": "error", "message": "No readable image found in upload"}
 
@@ -1963,7 +2592,7 @@ async def analyze_imaging(
         return {"status": "success", "study": row}
     except Exception as e:
         print(f"⚠️ Error in imaging analysis: {e}")
-        return {"status": "error", "message": f"Imaging analysis failed: {str(e)}"}
+        return {"status": "error", "message": f"Imaging analysis failed (ref {error_ref(e)})"}
 
 
 @fastapi_app.get("/api/imaging/patient/{patient_id}")
@@ -1999,7 +2628,7 @@ async def list_imaging_studies(patient_id: str):
         return {"status": "success", "studies": studies}
     except Exception as e:
         print(f"⚠️ Error listing imaging studies: {e}")
-        return {"status": "error", "message": str(e), "studies": []}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})", "studies": []}
 
 
 @fastapi_app.post("/api/imaging/{study_id}/review")
@@ -2080,7 +2709,7 @@ async def review_imaging_study(study_id: str, data: dict):
         return {"status": "success", "decision": decision, "reviewed_at": now}
     except Exception as e:
         print(f"⚠️ Error reviewing imaging study: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
 
 @fastapi_app.delete("/api/imaging/{study_id}")
@@ -2105,7 +2734,7 @@ async def delete_imaging_study(study_id: str):
                 print(f"⚠️ imaging delete: companion document removal failed: {e}")
         return {"status": "success"}
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
 
 # --- BACKGROUND PRE-ANALYSIS FOR ZERO LATENCY HANDOFF ---
@@ -2251,7 +2880,7 @@ async def ambient_consult_process(req: AmbientConsultRequest):
         
     except Exception as e:
         print(f"⚠️ Error in ambient consult process: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
 
 @fastapi_app.post("/api/doctor/ambient-consult/approve")
@@ -2336,7 +2965,7 @@ async def ambient_consult_approve(req: AmbientConsultApproveRequest):
 
     except Exception as e:
         print(f"⚠️ Error in ambient consult approval: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
 # --- VOICE QUERY ---
 @fastapi_app.post("/api/voice/query")
@@ -3078,7 +3707,7 @@ def _stream_openai_and_finalize(
                 yield _sse_event("token", {"t": delta.content})
     except Exception as e:
         print(f"❌ SSE stream error: {e}")
-        yield _sse_event("error", {"message": f"Stream interrupted: {e}"})
+        yield _sse_event("error", {"message": f"Stream interrupted (ref {error_ref(e)})"})
         return
 
     # Update rolling dialogue history
@@ -3243,7 +3872,7 @@ async def voice_query_stream(data: dict):
             return StreamingResponse(_instant(), media_type="text/event-stream")
         except Exception as e:
             def _err():
-                yield _sse_event("error", {"message": str(e)})
+                yield _sse_event("error", {"message": f"Something went wrong (ref {error_ref(e)})"})
             return StreamingResponse(_err(), media_type="text/event-stream")
 
     intent_data = await detect_intent_async(question)
@@ -3263,7 +3892,7 @@ async def voice_query_stream(data: dict):
             return StreamingResponse(_instant_nav(), media_type="text/event-stream")
         except Exception as e:
             def _nav_err():
-                yield _sse_event("error", {"message": str(e)})
+                yield _sse_event("error", {"message": f"Something went wrong (ref {error_ref(e)})"})
             return StreamingResponse(_nav_err(), media_type="text/event-stream")
 
     # ── TIER CLASSIFICATION ──
@@ -3323,7 +3952,7 @@ Return ONLY a JSON object:
             return StreamingResponse(_instant_cmd(), media_type="text/event-stream")
         except Exception as e:
             def _cmd_err():
-                yield _sse_event("error", {"message": str(e)})
+                yield _sse_event("error", {"message": f"Something went wrong (ref {error_ref(e)})"})
             return StreamingResponse(_cmd_err(), media_type="text/event-stream")
 
     # ── TIER 1: CHITCHAT MODE — stream ──
@@ -3551,7 +4180,7 @@ async def patient_history_query(data: dict):
         return result
     except Exception as e:
         print(f"❌ RAG query error: {e}")
-        return {"status": "error", "message": f"RAG query failed: {str(e)}"}
+        return {"status": "error", "message": f"RAG query failed (ref {error_ref(e)})"}
 
 
 @fastapi_app.post("/api/patient/history/query/stream")
@@ -3599,7 +4228,7 @@ async def patient_history_query_stream(data: dict):
         )
     except Exception as e:
         def _search_err():
-            yield _sse_event("error", {"message": f"Search failed: {e}"})
+            yield _sse_event("error", {"message": f"Search failed (ref {error_ref(e)})"})
         return StreamingResponse(_search_err(), media_type="text/event-stream")
 
     profile_text = await _patient_profile_text(patient_id)
@@ -3621,7 +4250,7 @@ async def patient_history_query_stream(data: dict):
                     full_answer += token
                     yield _sse_event("token", {"t": token})
         except Exception as e:
-            yield _sse_event("error", {"message": f"Synthesis error: {e}"})
+            yield _sse_event("error", {"message": f"Synthesis error (ref {error_ref(e)})"})
             return
 
         yield _sse_event("done", {
@@ -3661,7 +4290,7 @@ async def patient_history_timeline(data: dict):
         return result
     except Exception as e:
         print(f"❌ Timeline error: {e}")
-        return {"status": "error", "message": f"Timeline generation failed: {str(e)}"}
+        return {"status": "error", "message": f"Timeline generation failed (ref {error_ref(e)})"}
 
 
 @fastapi_app.post("/api/patient/history/progression/stream")
@@ -3703,7 +4332,7 @@ async def patient_history_progression_stream(data: dict):
                     full += token
                     yield _sse_event("token", {"t": token})
         except Exception as e:
-            yield _sse_event("error", {"message": f"Progression synthesis error: {e}"})
+            yield _sse_event("error", {"message": f"Progression synthesis error (ref {error_ref(e)})"})
             return
 
         yield _sse_event("done", {
@@ -4115,7 +4744,7 @@ async def book_appointment(data: dict):
     # awaiting before responding) removes ~200-400ms from what the caller
     # waits on, without weakening any guarantee: if this fails, the
     # appointment still exists and just missed a "New" notification banner.
-    asyncio.create_task(_notify_appointment_booked(data, hospital_id))
+    spawn(_notify_appointment_booked(data, hospital_id))
 
     timings["total"] = time.perf_counter() - t0
     print(f"⏱️  book_appointment timings: { {k: round(v*1000, 1) for k, v in timings.items()} } ms")
@@ -4283,9 +4912,9 @@ async def supabase_heartbeat():
 
 @fastapi_app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(warm_supabase_connection())
-    asyncio.create_task(seed_flagship_hospitals())
-    asyncio.create_task(supabase_heartbeat())
+    spawn(warm_supabase_connection())
+    spawn(seed_flagship_hospitals())
+    spawn(supabase_heartbeat())
 
 _HOSP_SEARCH_CACHE: dict = {}
 _HOSP_SEARCH_TTL = 90  # seconds — the VELA network changes rarely; patients wait on this list
@@ -4375,10 +5004,11 @@ async def _search_hospitals_global_impl(query: Optional[str] = None, lat: Option
         return {"status": "success", "hospitals": result.data or []}
         
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
 @fastapi_app.get("/api/appointments/today")
 async def get_today_appointments(hospital_id: str = None):
+    hospital_id = scoped_hospital_id(hospital_id)
     today = datetime.now().strftime("%Y-%m-%d")
 
     def _fetch():
@@ -4533,7 +5163,7 @@ async def accept_appointment(appointment_id: str, data: dict):
     if assigned_doctor_id:
         try:
             from receptionist import invalidate_and_recache
-            asyncio.create_task(invalidate_and_recache(assigned_doctor_id))
+            spawn(invalidate_and_recache(assigned_doctor_id))
         except Exception as e:
             print(f"⚠️ Warning: failed to trigger pre-cache on accept: {e}")
         
@@ -4587,7 +5217,7 @@ async def start_ticket_consult(ticket_id: str):
     if doc_id:
         try:
             from receptionist import invalidate_and_recache
-            asyncio.create_task(invalidate_and_recache(doc_id))
+            spawn(invalidate_and_recache(doc_id))
         except Exception as e:
             print(f"⚠️ Warning: failed to trigger pre-cache on consult start: {e}")
             
@@ -4606,7 +5236,7 @@ async def _on_consult_completed(ticket: dict):
     if doctor_id:
         try:
             from receptionist import invalidate_and_recache
-            asyncio.create_task(invalidate_and_recache(doctor_id))
+            spawn(invalidate_and_recache(doctor_id))
         except Exception as e:
             print(f"⚠️ Warning: failed to trigger pre-cache on consult complete: {e}")
 
@@ -4642,7 +5272,7 @@ async def _on_consult_completed(ticket: dict):
             # Never let document generation block or fail closing a consultation.
             print(f"⚠️ Visit report generation failed on consult close for {patient_id}: {e}")
 
-    asyncio.create_task(_generate())
+    spawn(_generate())
 
 
 @fastapi_app.post("/api/tickets/{ticket_id}/complete")
@@ -4710,12 +5340,17 @@ async def mark_appointment_arrived(appointment_id: str):
     supabase.table("tickets").insert(ticket_data).execute()
     
     # 3. Update appointment with queue position
-    supabase.table("appointments").update({"queue_position": q_pos}).eq("id", appointment_id).execute()
+    try:
+        supabase.table("appointments").update({"queue_position": q_pos}).eq("id", appointment_id).execute()
+    except Exception as e:
+        # The appointments table has no queue_position column; the ticket already holds it, and the
+        # patient's live position is read from the ticket. Don't fail a successful check-in over it.
+        print(f"ℹ️ appointments.queue_position not stored ({str(e)[:60]})")
 
     if doc_id:
         try:
             from receptionist import invalidate_and_recache
-            asyncio.create_task(invalidate_and_recache(doc_id))
+            spawn(invalidate_and_recache(doc_id))
         except Exception as e:
             print(f"⚠️ Warning: failed to trigger pre-cache on arrival: {e}")
 
@@ -4776,15 +5411,15 @@ def get_appointment_queue_status(appointment_id: str):
 
 @fastapi_app.get("/api/notifications/{role}")
 async def get_notifications(role: str):
+    hospital_id = scoped_hospital_id(None)
     try:
-        result = await asyncio.to_thread(
-            lambda: supabase.table("notifications")
-            .select("*")
-            .eq("role", role)
-            .order("created_at", desc=True)
-            .limit(20)
-            .execute()
-        )
+        def _query():
+            q = supabase.table("notifications").select("*").eq("role", role)
+            if hospital_id:
+                # This hospital's notifications plus network-wide ones (no hospital).
+                q = q.or_(f"hospital_id.eq.{hospital_id},hospital_id.is.null")
+            return q.order("created_at", desc=True).limit(20).execute()
+        result = await asyncio.to_thread(_query)
 
         mapped_notifications = []
         for item in (result.data or []):
@@ -4840,8 +5475,8 @@ def get_patient_appointments(patient_id: str):
 # --- HOSPITAL MANAGER ---
 @fastapi_app.get("/api/hospital/overview")
 def get_hospital_overview(hospital_id: str = "VLA-MAIN"):
+    hospital_id = scoped_hospital_id(hospital_id)
     try:
-        patients_res = supabase_admin.table("patients").select("*").eq("hospital_id", hospital_id).execute()
         beds_res = supabase_admin.table("beds").select("*").eq("hospital_id", hospital_id).execute()
         staff_res = supabase_admin.table("vela_staff").select("*").eq("hospital_id", hospital_id).execute()
         docs_res = supabase_admin.table("documents").select("*").execute() # Docs usually linked to patient, so hospital_id filter implicitly handled if we filter patients
@@ -4849,20 +5484,29 @@ def get_hospital_overview(hospital_id: str = "VLA-MAIN"):
         # Today's appointments
         from datetime import datetime
         today = datetime.now().strftime("%Y-%m-%d")
-        apt_res = supabase_admin.table("appointments").select("*").eq("hospital_id", hospital_id).eq("date", today).execute()
+        apt_res = supabase_admin.table("appointments").select("*").eq("hospital_place_id", hospital_id).eq("date", today).execute()
 
         # Admission stats
-        admissions_res = supabase_admin.table("admissions").select("*").eq("hospital_id", hospital_id).execute()
-        admissions_data = admissions_res.data or []
+        # Admissions are stored in the local database (see /api/admit), not in Supabase.
+        admissions_data = local_query("SELECT * FROM admissions WHERE hospital_id = ?", (hospital_id,)) or []
         active_inpatients = len([a for a in admissions_data if a.get('status') == 'active'])
         
         # Today's admissions count
         today_start = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat()
-        admissions_today = len([a for a in admissions_data if a.get('admitted_at') >= today_start])
+        admissions_today = len([a for a in admissions_data if (a.get('admitted_at') or '') >= today_start])
 
-        patients_data = patients_res.data or []
-        beds_data = beds_res.data or []
+        # The patients table has no hospital column: a hospital's patients are the ones who have
+        # been ticketed by its doctors, booked with it, or admitted to it.
         staff_data = staff_res.data or []
+        staff_ids = [x["id"] for x in staff_data if x.get("id")]
+        pid_set = {a.get("patient_id") for a in admissions_data if a.get("patient_id")}
+        if staff_ids:
+            tk = supabase_admin.table("tickets").select("patient_id").in_("doctor_id", staff_ids).execute()
+            pid_set |= {t["patient_id"] for t in (tk.data or []) if t.get("patient_id")}
+        ap = supabase_admin.table("appointments").select("patient_id").eq("hospital_place_id", hospital_id).execute()
+        pid_set |= {a["patient_id"] for a in (ap.data or []) if a.get("patient_id")}
+        patients_data = (supabase_admin.table("patients").select("*").in_("id", list(pid_set)).execute().data or []) if pid_set else []
+        beds_data = beds_res.data or []
         docs_data = docs_res.data or []
 
         total_beds = len(beds_data)
@@ -4917,10 +5561,11 @@ def get_hospital_overview(hospital_id: str = "VLA-MAIN"):
         }
     except Exception as e:
         print("Overview fetch error:", str(e))
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
 @fastapi_app.get("/api/wards")
 def get_wards(hospital_id: str = "VLA-MAIN"):
+    hospital_id = scoped_hospital_id(hospital_id)
     wards_res = supabase_admin.table("wards").select("*").eq("hospital_id", hospital_id).execute()
     beds_res = supabase_admin.table("beds").select("*").eq("hospital_id", hospital_id).execute()
     patients_res = supabase_admin.table("patients").select("id, name, vela_id, risk_score, age, diagnosis").execute()
@@ -4940,6 +5585,7 @@ def get_wards(hospital_id: str = "VLA-MAIN"):
 
 @fastapi_app.post("/api/wards")
 def create_ward(data: dict):
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     hospital_id = data.get("hospital_id", "VLA-MAIN")
     result = supabase_admin.table("wards").insert({
         "hospital_id": hospital_id,
@@ -4964,6 +5610,7 @@ def create_ward(data: dict):
 
 @fastapi_app.post("/api/beds")
 def create_bed(data: dict):
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     result = supabase.table("beds").insert({
         "hospital_id": data.get("hospital_id", "VLA-MAIN"),
         "ward_id": data.get("ward_id") if data.get("ward_id") else None,
@@ -5052,25 +5699,15 @@ def delete_bed(bed_id: str):
     return {"status": "success"}
     
 # --- STAFF ---
-@fastapi_app.post("/api/staff/add")
-def add_staff_basic(data: dict):
-    result = supabase_admin.table("vela_staff").insert({
-        "hospital_id": data.get("hospital_id", "VLA-MAIN"),
-        "name": data.get("name"),
-        "role": data.get("role"),
-        "email": data.get("email"),
-        "active": True
-    }).execute()
-    return {"status": "success", "staff": result.data[0]}
-
-@fastapi_app.delete("/api/staff/{staff_id}")
-def delete_staff(staff_id: str):
-    supabase_admin.table("vela_staff").delete().eq("id", staff_id).execute()
-    return {"status": "success"}
-
 @fastapi_app.get("/api/staff/list")
 def get_staff_legacy():
-    result = supabase_admin.table("vela_staff").select("*").execute()
+    # Never select("*"): the row holds the password hash.
+    hospital_id = scoped_hospital_id(None)
+    if not hospital_id:
+        return {"status": "success", "staff": []}
+    result = supabase_admin.table("vela_staff").select(
+        "id, hospital_id, name, role, specialization, email, active, online, last_active, ward_id, created_at"
+    ).eq("hospital_id", hospital_id).execute()
     return {"status": "success", "staff": result.data}
 
 # --- LAB & TEST FLOW ROUTES ---
@@ -5495,7 +6132,7 @@ async def file_generated_document(
         except Exception as e:
             print(f"⚠️ RAG ingest failed for generated doc {doc_id}: {e}")
 
-    asyncio.create_task(_embed())
+    spawn(_embed())
     return doc_id
 
 
@@ -5507,6 +6144,7 @@ def get_lab_departments():
 @fastapi_app.get("/api/lab/catalog")
 def get_lab_catalog(hospital_id: Optional[str] = None, department: Optional[str] = None):
     """Full orderable test menu: built-in catalog plus this hospital's custom formats."""
+    hospital_id = scoped_hospital_id(hospital_id)
     items = lab_catalog.catalog_listing()
 
     custom = local_query(
@@ -5538,6 +6176,7 @@ async def upsert_lab_catalog_entry(data: dict):
     up here already has a usable report layout: the built-in one for a known
     test, or a generic value/observation form for a brand-new one.
     """
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     test_type = (data.get("test_type") or "").strip()
     if not test_type:
         return {"status": "error", "message": "Test name is required"}
@@ -5619,6 +6258,7 @@ def get_lab_orders(
     An explicit `department` query param narrows further (the super-lab account
     uses it to switch between department tabs).
     """
+    hospital_id = scoped_hospital_id(hospital_id)
     network_lab_id = network_lab_id_for_session(request)
     if network_lab_id:
         # An independent lab only ever sees orders routed to it (Phase 4) —
@@ -5674,6 +6314,7 @@ def get_completed_lab_orders(
     limit: int = 50,
 ):
     """Processed cases, with their report attached — powers the lab's Completed tab."""
+    hospital_id = scoped_hospital_id(hospital_id)
     network_lab_id = network_lab_id_for_session(request)
     if network_lab_id:
         clauses = ["status = 'completed'", "network_lab_id = ?"]
@@ -5746,6 +6387,7 @@ def get_completed_lab_orders(
 
 @fastapi_app.get("/api/lab/orders/pending-payment")
 def get_pending_payment_orders(hospital_id: Optional[str] = None):
+    hospital_id = scoped_hospital_id(hospital_id)
     # Returns all test orders pending payment from local SQLite
     if hospital_id:
         hospital_id = get_valid_hospital_id(hospital_id)
@@ -5835,6 +6477,7 @@ def get_orders_awaiting_arrival(hospital_id: Optional[str] = None, department: O
     This is reception's arrivals board: the patient walks up to the blood-test
     lab, reception finds them here and marks them arrived.
     """
+    hospital_id = scoped_hospital_id(hospital_id)
     clauses = ["status = 'awaiting_arrival'"]
     params: list = []
     if hospital_id:
@@ -6207,6 +6850,7 @@ def get_lab_template(test_type: str, hospital_id: Optional[str] = None, network_
     independent lab's own format is looked up the same way, keyed by
     network_lab_id instead — the two scopes never mix.
     """
+    hospital_id = scoped_hospital_id(hospital_id)
     if network_lab_id:
         rows = local_query(
             "SELECT * FROM lab_templates WHERE LOWER(test_type) = LOWER(?) "
@@ -6261,6 +6905,7 @@ def get_lab_template(test_type: str, hospital_id: Optional[str] = None, network_
 @fastapi_app.get("/api/lab/templates")
 def list_lab_templates(hospital_id: Optional[str] = None, department: Optional[str] = None, network_lab_id: Optional[str] = None):
     """Every report format available to this lab — catalog built-ins plus custom."""
+    hospital_id = scoped_hospital_id(hospital_id)
     clauses, params = [], []
     if network_lab_id:
         clauses.append("network_lab_id = ?")
@@ -6330,6 +6975,7 @@ def _clean_template_fields(fields: list) -> list:
 @fastapi_app.post("/api/lab/templates")
 async def create_lab_template(data: dict):
     """Save a lab's own report format so it can be reused on future orders."""
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     test_type = (data.get("test_type") or "").strip()
     fields = _clean_template_fields(data.get("fields"))
     if not test_type:
@@ -6791,6 +7437,7 @@ async def build_visit_report(
 
 @fastapi_app.post("/api/visit-report/generate")
 async def generate_visit_report(data: dict):
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     patient_id = data.get("patient_id")
     if not patient_id:
         return {"status": "error", "message": "patient_id is required"}
@@ -6810,7 +7457,7 @@ async def generate_visit_report(data: dict):
         return {"status": "success", **result}
     except Exception as e:
         print(f"⚠️ Visit report generation failed for {patient_id}: {e}")
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
 
 @fastapi_app.get("/api/visit-reports/{patient_id}")
@@ -7138,6 +7785,7 @@ def scan_admission_qr(admission_qr: str):
 
 @fastapi_app.get("/api/admissions/active")
 def get_active_admissions(hospital_id: Optional[str] = None):
+    hospital_id = scoped_hospital_id(hospital_id)
     # Get active admissions from local SQLite
     if hospital_id:
         hospital_id = get_valid_hospital_id(hospital_id)
@@ -7279,7 +7927,7 @@ Be professional. Be concise. Use medical language. Maximum 300 words."""
             "reports_count": len(reports_res)
         }
     except Exception as e:
-        return {"status": "error", "message": f"Summary generation failed: {str(e)}"}
+        return {"status": "error", "message": f"Summary generation failed (ref {error_ref(e)})"}
 
 @fastapi_app.post("/api/discharge/confirm")
 async def confirm_discharge(req: DischargeConfirmRequest):
@@ -7387,7 +8035,7 @@ async def confirm_discharge(req: DischargeConfirmRequest):
         }
     except Exception as e:
         print("Discharge error:", e)
-        return {"status": "error", "message": f"Discharge failed: {str(e)}"}
+        return {"status": "error", "message": f"Discharge failed (ref {error_ref(e)})"}
 
 @fastapi_app.get("/api/history/patient/{patient_id}")
 def get_patient_history(patient_id: str):
@@ -7432,6 +8080,125 @@ def get_discharge_details(discharge_id: str):
 @fastapi_app.get("/health")
 def health():
     return {"status": "Atlas AI is running 🚀"}
+
+# ── AUTHZ RESOURCE RESOLVERS ──
+# authz.py checks a path id (appointment_id, order_id, …) against the record it
+# names. Each resolver returns the owning patient / hospital (/ network
+# provider) of one record, or None when it doesn't exist — the handler then
+# answers "not found" itself.
+
+def _first(rows):
+    return rows[0] if rows else None
+
+def _sb_row(table: str, columns: str, value: str, key: str = "id"):
+    return _first(supabase_admin.table(table).select(columns).eq(key, value).limit(1).execute().data)
+
+def _local_row(sql: str, value: str):
+    return _first(local_query(sql, (value,)))
+
+def _uuid_or_none(v):
+    return v if is_valid_uuid(v) else None
+
+def _resolve_appointment(aid):
+    if not is_valid_uuid(aid):
+        return None
+    row = _sb_row("appointments", "*", aid)
+    if not row:
+        return None
+    return {"patient_id": row.get("patient_id"),
+            "hospital_id": _uuid_or_none(row.get("hospital_id") or row.get("hospital_place_id"))}
+
+def _resolve_lab_order(oid):
+    row = _local_row("SELECT patient_id, hospital_id, network_lab_id FROM test_orders WHERE id = ?", oid)
+    return dict(row) if row else None
+
+def _resolve_document(did):
+    if not is_valid_uuid(did):
+        return None
+    row = _sb_row("documents", "patient_id", did)
+    return {"patient_id": row.get("patient_id")} if row else None
+
+def _resolve_generated_file(did):
+    row = _local_row("SELECT patient_id FROM generated_files WHERE document_id = ?", did)
+    return dict(row) if row else None
+
+def _resolve_admission(aid):
+    row = _local_row("SELECT patient_id, hospital_id FROM admissions WHERE id = ?", aid)
+    return dict(row) if row else None
+
+def _resolve_admission_qr(qr):
+    row = _local_row("SELECT patient_id, hospital_id FROM admissions WHERE admission_qr = ?", qr)
+    return dict(row) if row else None
+
+def _resolve_discharge(did):
+    row = _local_row(
+        "SELECT d.patient_id, a.hospital_id FROM discharges d "
+        "LEFT JOIN admissions a ON a.id = d.admission_id WHERE d.id = ?", did)
+    return dict(row) if row else None
+
+def _resolve_ticket(tid):
+    if not is_valid_uuid(tid):
+        return None
+    row = _sb_row("tickets", "patient_id, doctor_id", tid)
+    if not row:
+        return None
+    # tickets has no hospital column; it belongs to its doctor's hospital
+    doc = _sb_row("vela_staff", "hospital_id", row["doctor_id"]) if is_valid_uuid(row.get("doctor_id")) else None
+    return {"patient_id": row.get("patient_id"), "hospital_id": (doc or {}).get("hospital_id")}
+
+def _resolve_hospital_owned(table):
+    def _fn(rid):
+        if not is_valid_uuid(rid):
+            return None
+        row = _sb_row(table, "hospital_id", rid)
+        return {"hospital_id": row.get("hospital_id")} if row else None
+    return _fn
+
+def _resolve_imaging_study(sid):
+    row = _local_row("SELECT patient_id FROM imaging_studies WHERE id = ?", sid)
+    return dict(row) if row else None
+
+def _resolve_reminder(rid):
+    row = _sb_row("reminders", "patient_id", rid)
+    return {"patient_id": row.get("patient_id")} if row else None
+
+def _resolve_lab_template(tid):
+    row = _local_row("SELECT hospital_id, network_lab_id FROM lab_templates WHERE id = ?", tid)
+    return dict(row) if row else None
+
+def _resolve_network_appointment(aid):
+    if not is_valid_uuid(aid):
+        return None
+    row = _sb_row("network_appointments", "patient_id, hospital_id", aid)
+    return dict(row) if row else None
+
+def _resolve_network_doctor_appointment(aid):
+    if not is_valid_uuid(aid):
+        return None
+    row = _sb_row("network_doctor_appointments", "patient_id, doctor_id", aid)
+    return {"patient_id": row.get("patient_id"), "network_doctor_id": row.get("doctor_id")} if row else None
+
+for _kind, _fn in {
+    "appointment": _resolve_appointment,
+    "lab_order": _resolve_lab_order,
+    "document": _resolve_document,
+    "generated_file": _resolve_generated_file,
+    "admission": _resolve_admission,
+    "admission_qr": _resolve_admission_qr,
+    "discharge": _resolve_discharge,
+    "ticket": _resolve_ticket,
+    "bed": _resolve_hospital_owned("beds"),
+    "ward": _resolve_hospital_owned("wards"),
+    "notification": _resolve_hospital_owned("notifications"),
+    "staff": _resolve_hospital_owned("vela_staff"),
+    "imaging_study": _resolve_imaging_study,
+    "reminder": _resolve_reminder,
+    "lab_template": _resolve_lab_template,
+    "lab_catalog_entry": _resolve_lab_template,
+    "network_appointment": _resolve_network_appointment,
+    "network_doctor_appointment": _resolve_network_doctor_appointment,
+}.items():
+    authz.register_resolver(_kind, _fn)
 
 from receptionist import router as receptionist_router
 fastapi_app.include_router(receptionist_router)
@@ -7537,7 +8304,7 @@ def network_receptionist_login(data: dict):
 
     return {
         "status": "success",
-        "token": issue_session_token("receptionist", hospital["receptionist_name"] or ""),
+        "token": issue_session_token("receptionist", hospital["receptionist_name"] or "", hospital_id=hospital["id"]),
         "hospital_id": hospital["id"],
         "hospital_name": hospital["name"],
         "receptionist_name": hospital["receptionist_name"]
@@ -7805,7 +8572,7 @@ def verify_network_doctor(doctor_id: str, request: _Request):
     in the provider network is an unverified account entering clinical data,
     so this check has no self-service path."""
     session = getattr(request.state, "session", None) or {}
-    if session.get("role") not in ("vela_owner", "hospital_manager"):
+    if session.get("role") != "vela_owner":
         return _JSONResponse(
             status_code=403,
             content={"status": "error", "message": "Not authorized to verify providers"},
@@ -7931,10 +8698,8 @@ async def network_doctor_appointment_arrive(appointment_id: str):
 
 @sio.event
 async def join_room(sid, data):
-    room = data.get("room")
-    if room:
-        await sio.enter_room(sid, room)
-        print(f"[Socket.IO] {sid} joined room: {room}")
+    # Same as join_hospital: arbitrary rooms can't be joined; the session decides.
+    await on_join_hospital(sid, data)
 
 
 # ── MEM0 MEMORY WIPE UTILITY ──
@@ -7977,7 +8742,7 @@ async def wipe_patient_mem0(data: dict):
             results[pid] = {"deleted": deleted_count, "status": "wiped"}
             print(f"🧹 Wiped {deleted_count} Mem0 memories for patient {pid}")
         except Exception as e:
-            results[pid] = {"status": "error", "message": str(e)}
+            results[pid] = {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
             print(f"⚠️ Failed to wipe Mem0 for patient {pid}: {e}")
 
     return {
@@ -7989,17 +8754,23 @@ async def wipe_patient_mem0(data: dict):
 
 # ── DEMO PATIENT SEED ──
 
+_DEMO_PATIENT_CACHE: dict = {}
+
 @fastapi_app.post("/api/demo/seed-patient")
 def seed_demo_patient():
     """Creates the demo patient if they don't exist. Safe to call multiple times."""
     demo_email = "patient@vela.ai"
     demo_name = "Rajesh Kumar"
 
-    existing = supabase.table("patients").select("*").eq("email", demo_email).execute()
+    # Find the seed by its VELA ID first: the name and email are editable by the patient
+    # (Edit my details), the ID is not — so the demo login can't lose its patient.
+    existing = supabase.table("patients").select("*").eq("vela_id", "VLA-8888").limit(1).execute()
+    if not existing.data:
+        existing = supabase.table("patients").select("*").eq("email", demo_email).limit(1).execute()
     if existing.data:
         patient = existing.data[0]
         if not patient.get("vela_id"):
-            update_res = supabase.table("patients").update({"vela_id": "VLA-8888"}).eq("email", demo_email).execute()
+            update_res = supabase.table("patients").update({"vela_id": "VLA-8888"}).eq("id", patient["id"]).execute()
             if update_res.data:
                 patient = update_res.data[0]
         return {"status": "success", "patient": patient, "created": False}
@@ -8034,20 +8805,29 @@ def seed_demo_patient():
 
 # ── VELA OWNER ROUTES ──
 
-OWNER_EMAIL = "dev@vela.ai"
-OWNER_PASSWORD = "dev1"
+# Owner credentials come from the environment, never the source. Store a
+# bcrypt hash, generated with:
+#   python -c "import bcrypt,getpass; print(bcrypt.hashpw(getpass.getpass().encode(), bcrypt.gensalt()).decode())"
+# Without both set, owner login is switched off.
+OWNER_EMAIL = (os.getenv("VELA_OWNER_EMAIL") or "").strip().lower()
+OWNER_PASSWORD_HASH = (os.getenv("VELA_OWNER_PASSWORD_HASH") or "").strip()
+OWNER_NAME = os.getenv("VELA_OWNER_NAME") or "Vela Owner"
+if not (OWNER_EMAIL and OWNER_PASSWORD_HASH.startswith(("$2a$", "$2b$"))):
+    print("ℹ️  Owner login disabled — set VELA_OWNER_EMAIL and VELA_OWNER_PASSWORD_HASH (bcrypt) to enable it.")
 
 @fastapi_app.post("/api/owner/login")
-def owner_login(data: dict):
-    email = data.get("email", "")
-    password = data.get("password", "")
-    if email == OWNER_EMAIL and password == OWNER_PASSWORD:
+async def owner_login(data: dict):
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
+    configured = OWNER_EMAIL and OWNER_PASSWORD_HASH.startswith(("$2a$", "$2b$"))
+    if configured and hmac.compare_digest(email, OWNER_EMAIL) and \
+            await asyncio.to_thread(verify_password, password, OWNER_PASSWORD_HASH):
         return {
             "status": "success",
             "role": "vela_owner",
-            "name": "Dev Chalana",
-            "message": "Welcome back, Dev",
-            "token": issue_session_token("vela_owner", "Dev Chalana"),
+            "name": OWNER_NAME,
+            "message": f"Welcome back, {OWNER_NAME.split()[0]}",
+            "token": issue_session_token("vela_owner", OWNER_NAME),
         }
     return {"status": "error", "message": "Invalid credentials"}
 
@@ -8085,7 +8865,7 @@ def onboard_hospital(data: dict):
 
         # Generate manager credentials
         manager_email = f"manager@{slug}.vela.health"
-        manager_password = f"Vela@{random.randint(1000, 9999)}"
+        manager_password = generate_password(12)
 
         # Insert Hospital using admin client to bypass RLS
         h_insert = supabase_admin.table("vela_hospitals").insert({
@@ -8102,7 +8882,7 @@ def onboard_hospital(data: dict):
             "mapbox_place_id": mapbox_place_id,
             "manager_name": manager_name,
             "manager_email": manager_email,
-            "manager_password": manager_password,
+            "manager_password": hash_password(manager_password),
             "hospital_slug": slug,
             "verified": True,
             "active": True,
@@ -8110,7 +8890,8 @@ def onboard_hospital(data: dict):
 
         if not h_insert.data or len(h_insert.data) == 0:
             err_msg = getattr(h_insert, 'error', 'Unknown Error')
-            return {"status": "error", "message": f"DB Error (Hospital): {err_msg}"}
+            print(f"⚠️ hospital insert failed: {err_msg}")
+            return {"status": "error", "message": "Could not create the hospital. Please try again."}
 
         hospital_id = h_insert.data[0]["id"]
 
@@ -8135,7 +8916,7 @@ def onboard_hospital(data: dict):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return {"status": "error", "message": f"Server Error: {str(e)}"}
+        return {"status": "error", "message": f"Server Error (ref {error_ref(e)})"}
 
 
 @fastapi_app.get("/api/owner/hospitals")
@@ -8213,6 +8994,7 @@ def manager_login(data: dict):
 
 @fastapi_app.post("/api/manager/add-staff")
 def add_staff(data: dict):
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     import re as _re, random as _random
     hospital_id = data.get("hospital_id")
     name = data.get("name", "")
@@ -8233,8 +9015,7 @@ def add_staff(data: dict):
     if existing.data:
         email = f"{name_slug}{_random.randint(10,99)}@{slug}.vela.health"
 
-    digits = _random.randint(1000, 9999)
-    password = f"Vela@{digits}"
+    password = generate_password(12)
 
     result = supabase_admin.table("vela_staff").insert({
         "hospital_id": hospital_id,
@@ -8243,7 +9024,7 @@ def add_staff(data: dict):
         "specialization": specialization,
         "ward_id": data.get("ward_id") if data.get("ward_id") else None,
         "email": email,
-        "password": password,
+        "password": hash_password(password),
         "active": True,
         "online": False
     }).execute()
@@ -8315,7 +9096,7 @@ async def staff_login(data: dict):
     except asyncio.TimeoutError:
         return {"status": "error", "message": "Login service timed out. Please try again."}
     except Exception as e:
-        return {"status": "error", "message": f"Login failed: {str(e)}"}
+        return {"status": "error", "message": f"Login failed (ref {error_ref(e)})"}
     # bcrypt is deliberately slow (~0.3s of CPU): keep it off the event loop so other requests keep flowing.
     if not staff_res.data or not await asyncio.to_thread(verify_password, password, staff_res.data[0].get("password") or ""):
         return {"status": "error", "message": "Invalid credentials"}
@@ -8339,7 +9120,7 @@ async def staff_login(data: dict):
             )
         except Exception:
             pass  # Non-critical, don't fail login if online-status write fails
-    asyncio.create_task(_mark_online())
+    spawn(_mark_online())
     # A lab account's `specialization` doubles as its department scope — a staff
     # row with specialization "radiology" only ever sees the radiology queue.
     lab_department = ""
@@ -8363,16 +9144,9 @@ async def staff_login(data: dict):
     }
 
 
-@fastapi_app.post("/api/staff/logout")
-def staff_logout(data: dict):
-    staff_id = data.get("staff_id")
-    if staff_id:
-        supabase_admin.table("vela_staff").update({"online": False}).eq("id", staff_id).execute()
-    return {"status": "success"}
-
-
 @fastapi_app.post("/api/manager/complete-walkthrough")
 def complete_walkthrough(data: dict):
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     hospital_id = data.get("hospital_id")
     supabase_admin.table("vela_walkthrough").update({
         "completed": True, 
@@ -8385,8 +9159,9 @@ def complete_walkthrough(data: dict):
 def command_center(hospital_id: str):
     try:
         staff = supabase_admin.table("vela_staff").select("id, name, role, online, last_active").eq("hospital_id", hospital_id).eq("active", True).execute()
-        admissions = supabase_admin.table("admissions").select("id, status, admitted_at, discharged_at").eq("hospital_id", hospital_id).execute()
-        lab_orders = supabase_admin.table("test_orders").select("id, status").execute()
+        # Admissions and lab orders live in the local database, not in Supabase.
+        admissions = _LocalRows(local_query("SELECT id, status, admitted_at, discharged_at FROM admissions WHERE hospital_id = ?", (hospital_id,)))
+        lab_orders = _LocalRows(local_query("SELECT id, status FROM test_orders WHERE hospital_id = ?", (hospital_id,)))
         today = datetime.utcnow().strftime("%Y-%m-%d")
         queries = supabase_admin.table("voice_queries").select("id").gte("created_at", today).execute()
         
@@ -8407,52 +9182,9 @@ def command_center(hospital_id: str):
     except Exception as e:
         return {"status": "success", "staff_online": [], "patients_waiting": 0, "patients_in_consultation": 0, "patients_in_lab": 0, "patients_in_ward": 0, "discharged_today": 0, "atlas_queries_today": 0, "critical_alerts_today": 0}
 
-@fastapi_app.get("/api/symptoms/list")
-def get_symptoms_list():
-    if diagnostic_symptoms_list is None:
-        return {"status": "error", "message": "Symptom list not loaded"}
-    return {"status": "success", "symptoms": diagnostic_symptoms_list}
-
-@fastapi_app.post("/api/predict/disease")
-def predict_disease(data: dict):
-    if disease_model is None or disease_encoder is None or diagnostic_symptoms_list is None:
-        return {"status": "error", "message": "Diagnostic Engine not initialized"}
-    
-    selected_symptoms = data.get('symptoms', [])
-    if not selected_symptoms:
-        return {"status": "error", "message": "No symptoms provided"}
-    
-    # Create binary input vector
-    input_vector = np.zeros(len(diagnostic_symptoms_list))
-    for symptom in selected_symptoms:
-        if symptom in diagnostic_symptoms_list:
-            idx = diagnostic_symptoms_list.index(symptom)
-            input_vector[idx] = 1
-    
-    try:
-        # Get probabilities
-        probs = disease_model.predict_proba([input_vector])[0]
-        
-        # Get top 3
-        top_indices = np.argsort(probs)[-3:][::-1]
-        top_3_results = []
-        
-        for idx in top_indices:
-            top_3_results.append({
-                'disease': str(disease_encoder.inverse_transform([idx])[0]),
-                'probability': round(float(probs[idx]) * 100, 2)
-            })
-        
-        return {
-            "status": "success",
-            "results": top_3_results,
-            "symptoms_analyzed": len(selected_symptoms)
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
-
 @fastapi_app.post("/api/hospital/setup/complete")
 def hospital_setup_complete(data: dict):
+    data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     hospital_id = data.get("hospital_id")
     specializations = data.get("specializations", [])
     total_beds = data.get("total_beds", 100)

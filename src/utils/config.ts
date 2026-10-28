@@ -1,4 +1,10 @@
 export const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000"
+
+// A production build without VITE_API_URL would quietly call the visitor's own
+// localhost and every request would fail; make the misconfiguration obvious.
+if (import.meta.env.PROD && !import.meta.env.VITE_API_URL) {
+  console.error("VITE_API_URL is not set for this build — the app cannot reach its backend.")
+}
 export const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || API_URL
 
 // Socket events are the primary refresh path everywhere these poll; these
