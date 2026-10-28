@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 import random
 from main import (
     supabase, supabase_admin, sio, mem0_client, openai_client,
-    set_active_consult, clear_active_consult,
+    set_active_consult, clear_active_consult, is_valid_uuid, spawn, scoped_hospital_id, error_ref,
 )
 
 router = APIRouter()
@@ -52,7 +52,7 @@ async def invalidate_and_recache(doctor_id: str):
             AtlasClinicalCache.pop(doctor_id, None)
             print(f"⚠️ Warning: Lock timeout during invalidation for doctor {doctor_id}. Cache force-popped.")
         # Trigger fresh pre-cache in a background task regardless
-        asyncio.create_task(pre_cache_next_patient(doctor_id))
+        spawn(pre_cache_next_patient(doctor_id))
     except Exception as e:
         print(f"⚠️ Warning: Failed to invalidate and recache for doctor {doctor_id}: {e}")
 
@@ -309,7 +309,7 @@ async def register_patient(data: RegisterPatientRequest):
     try:
         vela_id = generate_vela_id()
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": f"Something went wrong (ref {error_ref(e)})"}
 
     # Insert into patients (hospital_id is NOT a column on the patients table)
     result = supabase.table("patients").insert({
@@ -387,7 +387,22 @@ async def self_register_patient(data: RegisterPatientRequest):
     data.doctor = ""
     data.diagnosis = ""
     data.hospital_id = None
-    return await register_patient(data)
+    data.email = (data.email or "").strip()
+    if data.email:
+        # Signing up must never hand out a session for someone else's record.
+        existing = await asyncio.to_thread(
+            lambda: supabase_admin.table("patients").select("id").ilike("email", data.email).limit(1).execute()
+        )
+        if existing.data:
+            return {"status": "error", "code": "email_exists",
+                    "message": "You already have a VELA record with this email. Please sign in instead."}
+    result = await register_patient(data)
+    if result.get("status") != "success":
+        return result
+    # The new patient is signed in straight away, so booking right after
+    # signing up works (portal principle: booking without a separate account).
+    from main import patient_session_payload
+    return {**result, **patient_session_payload(result["patient"])}
 
 
 # 2. Lookup patient by VELA ID
@@ -485,6 +500,7 @@ async def create_ticket(data: TicketCreateRequest):
         "vela_id": data.vela_id,
         "triage_level": data.triage_level,
         "is_emergency": is_emergency,
+        "hospital_id": h_id,
     })
 
     # Separate, unmissable signal for emergencies so clinical screens can alert
@@ -497,10 +513,11 @@ async def create_ticket(data: TicketCreateRequest):
             "department": data.department,
             "ticket_number": ticket_number,
             "notes": data.notes,
+            "hospital_id": h_id,
         })
 
     if data.doctor_id:
-        asyncio.create_task(invalidate_and_recache(data.doctor_id))
+        spawn(invalidate_and_recache(data.doctor_id))
 
     return {
         "status": "success",
@@ -515,6 +532,7 @@ async def create_ticket(data: TicketCreateRequest):
 # 4. Get current queue
 @router.get("/api/receptionist/queue")
 async def get_queue(department: Optional[str] = None, doctor_id: Optional[str] = None, hospital_id: Optional[str] = None, include_active: bool = False):
+    hospital_id = scoped_hospital_id(hospital_id)
     query = supabase.table("tickets").select("*, patients(name)")
     # The doctor dashboard also needs the patient currently in the room (in-progress);
     # every other caller (reception) wants the waiting line only.
@@ -549,7 +567,7 @@ async def get_queue(department: Optional[str] = None, doctor_id: Optional[str] =
                 await pre_cache_next_patient(did)
             finally:
                 _precache_inflight.discard(did)
-        asyncio.create_task(_warm())
+        spawn(_warm())
 
     if include_active:
         # A doctor sees one patient at a time. Old sessions that never got "completed" must not
@@ -606,6 +624,7 @@ async def get_queue(department: Optional[str] = None, doctor_id: Optional[str] =
 # 5. Doctor calls next patient
 @router.post("/api/doctor/next-patient")
 async def next_patient(data: NextPatientRequest):
+    data.hospital_id = scoped_hospital_id(data.hospital_id)
     # Determine the doctor's hospital and specialization to scope waitlist correctly
     resolved_hospital_id = data.hospital_id
     resolved_department = data.department
@@ -667,8 +686,8 @@ async def next_patient(data: NextPatientRequest):
         
         # Trigger background updates and new next lookahead pre-cache asynchronously
         if data.doctor_id:
-            asyncio.create_task(notify_subsequent_patient(data.doctor_id))
-            asyncio.create_task(pre_cache_next_patient(data.doctor_id))
+            spawn(notify_subsequent_patient(data.doctor_id))
+            spawn(pre_cache_next_patient(data.doctor_id))
             
             # Broadcast queue shift to hospital room in real time!
             if resolved_hospital_id:
@@ -799,8 +818,8 @@ async def next_patient(data: NextPatientRequest):
 
     # Fire subsequent patient waiting room notification and lookahead cache task
     if data.doctor_id:
-        asyncio.create_task(notify_subsequent_patient(data.doctor_id))
-        asyncio.create_task(pre_cache_next_patient(data.doctor_id))
+        spawn(notify_subsequent_patient(data.doctor_id))
+        spawn(pre_cache_next_patient(data.doctor_id))
         
         # Broadcast queue shift to hospital room
         if resolved_hospital_id:
@@ -862,7 +881,7 @@ async def complete_patient(data: CompletePatientRequest):
 
     if ticket.get("doctor_id"):
         clear_active_consult(ticket["doctor_id"])
-        asyncio.create_task(invalidate_and_recache(ticket["doctor_id"]))
+        spawn(invalidate_and_recache(ticket["doctor_id"]))
 
     return {
         "status": "success",
@@ -981,7 +1000,7 @@ async def assign_doctor(data: dict):
     })
     
     if doctor_id:
-        asyncio.create_task(invalidate_and_recache(doctor_id))
+        spawn(invalidate_and_recache(doctor_id))
         
     return {
         "status": "success",
@@ -1069,7 +1088,7 @@ async def mark_patient_arrived(appointment_id: str):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Database Failure: {str(e)}")
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal Database Failure (ref {error_ref(e)})")
 
 
 
@@ -1094,7 +1113,7 @@ def get_doctor_queue_stats(doctor_id: str):
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Queue-stats failure: {str(e)}"
+            detail=f"Queue-stats failure (ref {error_ref(e)})"
         )
 
 
@@ -1110,6 +1129,7 @@ async def next_patient_for_doctor(doctor_id: str, data: NextPatientRequest):
     4. Immediately marks it in-progress under the lock, assigns doctor_id,
        fetches the patient payload, and returns it.
     """
+    data.hospital_id = scoped_hospital_id(data.hospital_id)
     # Merge any request-body context with the URL path param
     data.doctor_id = doctor_id
 
@@ -1249,8 +1269,8 @@ async def next_patient_for_doctor(doctor_id: str, data: NextPatientRequest):
     await sio.emit("next_patient", payload)
 
     # Fire lookahead pre-cache and queue-shift broadcast
-    asyncio.create_task(notify_subsequent_patient(doctor_id))
-    asyncio.create_task(pre_cache_next_patient(doctor_id))
+    spawn(notify_subsequent_patient(doctor_id))
+    spawn(pre_cache_next_patient(doctor_id))
     if resolved_hospital_id:
         try:
             wait_count = (

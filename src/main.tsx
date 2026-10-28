@@ -5,11 +5,12 @@ import App from './App.tsx'
 
 import { gsap } from 'gsap'
 import { ScrollTrigger } from 'gsap/ScrollTrigger'
-import { installAuthFetch, installAuthAxios } from './utils/auth'
+import { installAuthFetch, installAuthAxios, enforceLocalSessionExpiry } from './utils/auth'
 
 gsap.registerPlugin(ScrollTrigger)
 
 // Must run before any component mounts and fires a request.
+enforceLocalSessionExpiry()
 installAuthFetch()
 installAuthAxios()
 

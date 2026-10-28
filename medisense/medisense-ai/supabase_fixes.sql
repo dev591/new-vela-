@@ -111,6 +111,8 @@ CREATE INDEX IF NOT EXISTS idx_network_doctor_appointments_doctor ON network_doc
 
 -- 6) Same access model as your existing tables ────────────────────────────────
 -- The backend reads these with the anon key, exactly like patients/tickets/etc.
+-- SUPERSEDED: rls_lockdown.sql re-enables RLS on every table. Don't re-run the
+-- DISABLE lines below on a database that has had rls_lockdown.sql applied.
 ALTER TABLE notifications               DISABLE ROW LEVEL SECURITY;
 ALTER TABLE admissions                  DISABLE ROW LEVEL SECURITY;
 ALTER TABLE reassess_requests           DISABLE ROW LEVEL SECURITY;

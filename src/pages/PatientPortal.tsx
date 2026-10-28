@@ -246,6 +246,8 @@ const PatientPortal = () => {
         velaId = reg.data.vela_id || patient?.vela_id || "";
         patientId = patient?.id || "";
 
+        // The booking call right below needs this session.
+        localStorage.setItem("vela_token", reg.data.token || "");
         localStorage.setItem("vela_auth", "true");
         localStorage.setItem("vela_role", "patient");
         localStorage.setItem("vela_vela_id", velaId);
@@ -306,23 +308,18 @@ const PatientPortal = () => {
         throw new Error("Sign in with the email you registered with, not your VELA ID.");
       }
 
-      const { error: authError } = await supabase.auth.signInWithPassword({
+      // The backend checks the password with Supabase Auth and only then
+      // issues a session for the record with that email.
+      const res = await axios.post(`${API_URL}/api/patient/login`, {
         email: identifier,
         password: signin.password,
       });
-
-      // Patients registered at a front desk have no Supabase account, so fall
-      // back to looking them up by email.
-      const res = await axios.get(`${API_URL}/api/patient/by-email/${identifier}`);
       const patient = res.data?.patient;
-      if (!patient) {
-        throw new Error(
-          authError
-            ? "We could not find an account with those details."
-            : "We found your sign-in but not your health record.",
-        );
+      if (res.data?.status !== "success" || !patient) {
+        throw new Error(res.data?.message || "We could not find an account with those details.");
       }
 
+      localStorage.setItem("vela_token", res.data.token || "");
       localStorage.setItem("vela_auth", "true");
       localStorage.setItem("vela_role", "patient");
       localStorage.setItem("vela_vela_id", patient.vela_id);
@@ -344,7 +341,7 @@ const PatientPortal = () => {
     }
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(signin.id.trim(), {
-        redirectTo: "https://velahealth.in/portal",
+        redirectTo: `${window.location.origin}/portal`,
       });
       if (error) throw new Error(error.message);
       toast.success("We've emailed you a link to set a new password.");
@@ -384,9 +381,13 @@ const PatientPortal = () => {
         email: register.email.trim(),
         emergency_contact: register.phone.trim(),
       });
+      if (res.data?.code === "email_exists") {
+        throw new Error("You already have a VELA record with this email. Please sign in instead.");
+      }
       const velaId = res.data?.vela_id || res.data?.patient?.vela_id;
       if (!velaId) throw new Error(res.data?.message || "Could not create your account");
 
+      localStorage.setItem("vela_token", res.data.token || "");
       localStorage.setItem("vela_auth", "true");
       localStorage.setItem("vela_role", "patient");
       localStorage.setItem("vela_vela_id", velaId);

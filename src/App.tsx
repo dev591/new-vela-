@@ -207,9 +207,10 @@ function App() {
         <Route path="/scan/:velaId" element={<QRScan />} />
         <Route path="/hospital-manager" element={<ProtectedRoute roles={['hospital_manager', 'manager']}><HospitalManager /></ProtectedRoute>} />
         <Route path="/lab-controller" element={<ProtectedRoute roles={['lab_controller', 'lab']}><LabController /></ProtectedRoute>} />
-        <Route path="/ward-scan" element={<WardScan />} />
+        <Route path="/ward-scan" element={<ProtectedRoute roles={['doctor', 'nurse', 'receptionist', 'hospital_manager', 'manager', 'lab_controller', 'lab']}><WardScan /></ProtectedRoute>} />
+        {/* VelaOwner renders its own sign-in form until an owner session exists. */}
         <Route path="/vela-owner" element={<VelaOwner />} />
-        <Route path="/walkthrough" element={<ManagerWalkthrough />} />
+        <Route path="/walkthrough" element={<ProtectedRoute roles={['hospital_manager', 'manager']}><ManagerWalkthrough /></ProtectedRoute>} />
       </Routes>
       </Suspense>
       </ErrorBoundary>

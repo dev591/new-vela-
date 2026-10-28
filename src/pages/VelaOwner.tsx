@@ -50,7 +50,8 @@ export default function VelaOwner() {
   const [verifyingDoctorId, setVerifyingDoctorId] = useState<string | null>(null);
 
   useEffect(() => {
-    if (localStorage.getItem('vela_owner') === 'true') setAuthed(true);
+    // The flag alone isn't a session: without a token every owner API call 401s.
+    if (localStorage.getItem('vela_owner') === 'true' && localStorage.getItem('vela_token')) setAuthed(true);
   }, []);
 
   useEffect(() => {
@@ -206,17 +207,6 @@ export default function VelaOwner() {
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
-
-    // DEMO BYPASS
-    if (email === "admin@vela.health" && password === "demo123") {
-      localStorage.setItem('vela_auth', 'true');
-      localStorage.setItem('vela_role', 'vela_owner');
-      localStorage.setItem('vela_owner', 'true');
-      setAuthed(true);
-      setLoading(false);
-      toast.success("Welcome to Vela HQ (Demo)");
-      return;
-    }
 
     try {
       const res = await fetch(`${API_URL}/api/owner/login`, {
