@@ -46,10 +46,6 @@ services:
         sync: false
       - key: KIOSK_DEMO_VELA_ID
         sync: false
-      - key: ELEVENLABS_API_KEY
-        sync: false
-      - key: ELEVENLABS_VOICE_ID
-        sync: false
       - key: GOOGLE_MAPS_KEY
         sync: false
       - key: VELA_OWNER_EMAIL

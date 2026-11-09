@@ -502,7 +502,6 @@ class AtlasCore {
     }
   }
 
-  // FIX 1 — ElevenLabs streaming with optimize_streaming_latency: 3
   // Plays an MP3 stream through MediaSource so speech begins on the first chunk.
   private async playProgressive(reader: ReadableStreamDefaultReader<Uint8Array>): Promise<boolean> {
     const ms = new MediaSource()
@@ -576,7 +575,7 @@ class AtlasCore {
 
     let spoken = false
 
-    // ElevenLabs is proxied by the backend so its key never ships to the
+    // Gnani Timbre is proxied by the backend (/api/tts) so its key never ships to the
     // browser; any failure (not configured, quota, network) falls back to the
     // browser's own voice below.
     {
@@ -618,7 +617,7 @@ class AtlasCore {
           })
         }
       } catch (e) {
-        console.warn("[Atlas] ElevenLabs error", e)
+        console.warn("[Atlas] Timbre error", e)
         spoken = false
       }
     }
@@ -695,8 +694,8 @@ class AtlasCore {
   stop() {
     this.interrupted = true
     this.isSpeaking = false
-    // Halt ElevenLabs playback (previously this leaked — stop() only cancelled
-    // browser TTS, so an ElevenLabs answer kept playing with no way to stop it).
+    // Halt Timbre playback (stop() used to cancel only browser TTS, so server-generated
+    // speech kept playing with no way to stop it).
     if (this.currentAudio) {
       try { this.currentAudio.pause(); this.currentAudio.src = "" } catch {}
       this.currentAudio = null

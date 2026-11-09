@@ -85,7 +85,8 @@ POLICY: Dict[tuple, Rule] = {
     ("POST", "/api/frontdesk/transcribe"): _PUB,      # voice kiosk; all three rate limited in gnani_voice.py
     ("POST", "/api/frontdesk/checkin"): _PUB,         # creates a ticket for the fixed demo patient only
     ("GET", "/api/frontdesk/warm"): _PUB,
-    ("POST", "/api/stt"): r(ANY_SESSION),             # speech-to-text for signed-in screens
+    ("POST", "/api/stt"): r(ANY_SESSION),
+    ("GET", "/api/voice/stats"): r(MANAGER, OWNER),            # Gnani usage and latency counters             # speech-to-text for signed-in screens
     ("POST", "/api/demo/login-patient"): _PUB,
 
     # Session housekeeping
@@ -179,6 +180,7 @@ POLICY: Dict[tuple, Rule] = {
     # Virtual consultation: a doctor opens a patient by VELA ID, even from another hospital (OTP approval comes later).
     ("POST", "/api/virtual-consult/open"): r(DOCTOR),
     ("POST", "/api/virtual-consult/analysis"): r(DOCTOR),
+    ("POST", "/api/virtual-consult/speak"): r(DOCTOR),
     ("POST", "/api/virtual-consult/pdf"): r(DOCTOR),
     ("POST", "/api/virtual-consult/file"): r(DOCTOR),
     ("POST", "/api/admissions/recommended/{rec_id}/dismiss"): r(FRONT, MANAGER),

@@ -4,6 +4,9 @@ Hospital operations platform: reception and queueing, doctor workspace with the
 Atlas voice assistant, lab orders and reports, admissions and discharge, a
 hospital manager console, and a patient portal.
 
+**Voice is built on Gnani AI:** Prisma (speech-to-text) and Timbre (text-to-speech).
+See "Voice (Gnani)" below and `docs/SUBMISSION.md` for the full write-up.
+
 - **Frontend:** React 19 + TypeScript + Vite (`src/`)
 - **Backend:** FastAPI + Socket.IO (`medisense/medisense-ai/`)
 - **Data:** Supabase (Postgres + Auth) plus a local SQLite file for sessions,
@@ -14,7 +17,7 @@ hospital manager console, and a patient portal.
 ```bash
 # Backend
 cd medisense/medisense-ai
-cp .env.example .env            # fill in Supabase, OpenAI, ElevenLabs, owner login
+cp .env.example .env            # fill in Supabase, OpenAI, Gnani, owner login, kiosk ids
 python -m venv .venv && .venv/bin/python -m pip install -r requirements.txt
 .venv/bin/uvicorn main:app --port 8000
 
@@ -26,6 +29,36 @@ npm run dev
 
 Before the first real deployment, run `medisense/medisense-ai/rls_lockdown.sql`
 in the Supabase SQL editor (see "Security model").
+
+## Voice (Gnani)
+
+| What | Where |
+|---|---|
+| Prisma + Timbre client, kiosk check-in, triage, usage stats | `medisense/medisense-ai/gnani_voice.py` |
+| Browser recorder (Web Audio, 16 kHz mono WAV) | `src/utils/voiceRecorder.ts`, `src/hooks/useVoiceInput.ts` |
+| Public voice kiosk (Hindi / Hinglish / English) | `/frontdesk` (`src/pages/FrontDesk.tsx`) |
+| Atlas always-on mic (Space mutes / unmutes) | `src/components/Atlas/AtlasCore.ts` |
+
+Backend env: `GNANI_API_KEY`, `KIOSK_HOSPITAL_ID` (the hospital kiosk tickets go to),
+`KIOSK_DEMO_VELA_ID` (the one synthetic demo patient the kiosk checks in),
+optional `HINGLISH_VOICE` (`Poorvi` default, or `Nalini`).
+
+Emergency triage is a plain keyword list (Devanagari and Roman spellings), never the
+model alone. The kiosk only checks people in and alerts staff; it gives no medical advice.
+Gnani allows one active request at a time per account, so every Prisma and Timbre call
+shares one lock. `GET /api/voice/stats` (manager) shows calls, errors, characters and
+average latency since the server started.
+
+## Other features
+
+- **Ward board** (reception: Wards tab; manager: Beds & Patients): every bed with the
+  patient's name, a detail panel, admit, transfer, discharge, out-of-service.
+- **Virtual consultation** (doctor sidebar): a doctor opens a patient's reports by VELA ID,
+  with a plain-language reading, trends, spoken explanation (Hindi / Hinglish / English),
+  and PDF / original-scan download. *College-presentation build: the VELA ID alone opens
+  the records; the patient's one-time-code (OTP) approval will be added later.*
+- **Demo data:** `medisense/medisense-ai/seed_demo_patients.py` adds three synthetic
+  patients (VLA-9001..9003) with several reports each.
 
 ## Tests
 
@@ -52,9 +85,9 @@ cd medisense/medisense-ai
   for Supabase Auth only) can't read or write any table.
 - **Realtime.** Socket.IO connections must present a session token. Events go
   only to the hospital's room or the patient's own room, never to everyone.
-- **Secrets.** Nothing secret goes in a `VITE_*` variable. ElevenLabs is
-  proxied through `POST /api/tts`, and the owner login is a bcrypt hash in the
-  backend `.env`.
+- **Secrets.** Nothing secret goes in a `VITE_*` variable. The Gnani key stays on
+  the server: Timbre is proxied through `POST /api/tts` and Prisma through
+  `POST /api/stt`. The owner login is a bcrypt hash in the backend `.env`.
 - **Audit.** Access to patient data is written to a hash-chained `audit_log`.
   `GET /api/audit-log/verify` reports the first row that was altered. A
   break-glass reason can be sent in the `X-Access-Reason` header.

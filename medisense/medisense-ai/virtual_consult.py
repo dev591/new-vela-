@@ -40,6 +40,11 @@ class FileBody(BaseModel):
     document_id: str
 
 
+class SpeakBody(BaseModel):
+    vela_id: str
+    lang: str = "hi-IN"          # hi-IN (Hindi), hi-en (Hinglish) or en-IN (English)
+
+
 # ───────────────────────── 1. Facts from the database ─────────────────────────
 
 def _db():
@@ -163,6 +168,57 @@ async def analyse(patient: dict, facts: dict) -> dict:
     return data
 
 
+# ───────────────────────── 2b. Spoken explanation for the patient (Gnani Timbre) ─────────────────────────
+
+_LANG_RULE = {
+    "en-IN": "Use simple English.",
+    "hi-IN": "Write in simple Hindi, in Devanagari script.",
+    "hi-en": "Write in Hinglish: Hindi words in Roman letters, the way people speak, e.g. 'Aapka hemoglobin thoda kam hai.'",
+}
+_SPEAK_SYSTEM = """The doctor is on a phone call and will play this to the PATIENT. Turn the findings below into a short spoken
+explanation of the patient's own results: 4 to 6 short, warm sentences, no medical jargon, at most two numbers.
+Never give treatment or medicine advice and never say how serious it is beyond what the findings say.
+End with one sentence saying the doctor will explain the next steps. {rule}
+Return JSON: {{"script": "..."}}"""
+_speech_cache: dict[tuple, tuple[float, dict]] = {}
+
+
+async def spoken_explanation(patient: dict, facts: dict, lang: str) -> dict:
+    """The explanation as text and as Timbre audio. Cached, because the doctor may press play more than once."""
+    from gnani_voice import GnaniError, VOICES, synthesize
+    if lang not in VOICES:
+        raise HTTPException(status_code=400, detail="Choose English, Hindi or Hinglish")
+    analysis = await analyse(patient, facts)
+    if not facts["reports"]:
+        raise HTTPException(status_code=404, detail="No reports to explain")
+    key = (patient["id"], ";".join(sorted(r["id"] for r in facts["reports"])), lang)
+    hit = _speech_cache.get(key)
+    if hit and time.time() - hit[0] < ANALYSIS_TTL:
+        return hit[1]
+    from main import openai_client
+    source = json.dumps({"headline": analysis.get("headline"), "summary": analysis.get("summary"),
+                         "findings": [f"{f.get('title')}: {f.get('detail')}" for f in analysis.get("findings", [])]})
+
+    def write_script():
+        r = openai_client.chat.completions.create(
+            model="gpt-4o-mini", temperature=0.3, max_tokens=500, response_format={"type": "json_object"},
+            messages=[{"role": "system", "content": _SPEAK_SYSTEM.format(rule=_LANG_RULE[lang])}, {"role": "user", "content": source}])
+        return (json.loads(r.choices[0].message.content or "{}").get("script") or "").strip()
+    try:
+        script = await asyncio.to_thread(write_script)
+        if not script:
+            raise ValueError("empty script")
+        audio = await synthesize(script[:1200], lang)
+    except GnaniError as e:
+        raise HTTPException(status_code=e.status, detail="The voice service is unavailable right now")
+    except Exception as e:
+        print(f"⚠️ spoken explanation failed: {type(e).__name__}")
+        raise HTTPException(status_code=502, detail="Could not prepare the spoken explanation")
+    out = {"script": script, "audio": base64.b64encode(audio).decode(), "lang": lang}
+    _speech_cache[key] = (time.time(), out)
+    return out
+
+
 # ───────────────────────── 3. PDF ─────────────────────────
 
 def build_pdf(patient: dict, facts: dict, analysis: dict, doctor: str) -> bytes:
@@ -259,6 +315,14 @@ async def reading(body: VelaIdBody):
     patient = await asyncio.to_thread(find_patient, body.vela_id)
     facts = await asyncio.to_thread(collect, patient)
     return {"status": "success", "analysis": await analyse(patient, facts)}
+
+
+@router.post("/api/virtual-consult/speak")
+async def speak(body: SpeakBody):
+    """Timbre reads the patient's results aloud in simple words, in English, Hindi or Hinglish."""
+    patient = await asyncio.to_thread(find_patient, body.vela_id)
+    facts = await asyncio.to_thread(collect, patient)
+    return {"status": "success", **(await spoken_explanation(patient, facts, body.lang))}
 
 
 @router.post("/api/virtual-consult/pdf")

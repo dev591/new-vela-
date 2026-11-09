@@ -7,7 +7,7 @@ import { useRef, useState } from 'react'
 import toast from 'react-hot-toast'
 import {
   Video, Search, Download, FileText, AlertTriangle, CheckCircle2, Eye, Info, ChevronDown, ChevronUp,
-  Loader2, MessageCircleQuestion, Lightbulb, Sparkles, X,
+  Loader2, MessageCircleQuestion, Lightbulb, Sparkles, X, Volume2, Square,
 } from 'lucide-react'
 import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 import DoctorSidebar from '../components/DoctorSidebar'
@@ -69,6 +69,8 @@ export default function VirtualConsult() {
   const [analysisState, setAnalysisState] = useState<'idle' | 'loading' | 'error'>('idle')
   const [open, setOpen] = useState<Record<string, boolean>>({})
   const [busy, setBusy] = useState('')
+  const [speech, setSpeech] = useState<{ lang: string; state: 'loading' | 'playing'; script?: string } | null>(null)
+  const audio = useRef<HTMLAudioElement | null>(null)
   const latest = useRef('')   // ignore a slow answer for an ID the doctor has already replaced
 
   const loadAnalysis = async (id: string) => {
@@ -97,6 +99,23 @@ export default function VirtualConsult() {
       }
     } catch { setError('Backend not reachable. Is the server running?') } finally { setLoading(false) }
   }
+
+  // Timbre reads the patient's results aloud in simple words, so the doctor can play it on the call.
+  const explain = async (lang: string) => {
+    if (!data) return
+    audio.current?.pause(); setSpeech({ lang, state: 'loading' })
+    try {
+      const res = await post('/api/virtual-consult/speak', { vela_id: data.patient.vela_id, lang })
+      const d = await res.json()
+      if (!res.ok) throw new Error(d.detail)
+      const a = new Audio(`data:audio/mpeg;base64,${d.audio}`)
+      audio.current = a
+      a.onended = () => setSpeech(null)
+      setSpeech({ lang, state: 'playing', script: d.script })
+      await a.play()
+    } catch (e) { setSpeech(null); toast.error((e as Error).message || 'Could not play the explanation') }
+  }
+  const stopSpeech = () => { audio.current?.pause(); setSpeech(null) }
 
   const download = async (kind: 'pdf' | 'file', documentId?: string) => {
     if (!data) return
@@ -203,6 +222,23 @@ export default function VirtualConsult() {
                             <div className="text-xs font-semibold mt-1" style={{ color: L.color }}>{L.label}</div></div>
                         </div>)
                     })}
+                  </div>
+
+                  {/* Spoken explanation for the patient, by Gnani Timbre */}
+                  <div className="rounded-2xl bg-canvas p-4 space-y-3">
+                    <div className="font-semibold flex items-center gap-2"><Volume2 size={18} className="text-brand" /> Explain it to the patient, out loud</div>
+                    <div className="flex flex-wrap gap-2">
+                      {[['hi-IN', 'हिन्दी'], ['hi-en', 'Hinglish'], ['en-IN', 'English']].map(([lang, label]) => (
+                        <button key={lang} onClick={() => void explain(lang)} disabled={speech?.state === 'loading'}
+                                className="min-h-11 px-5 rounded-xl border border-line bg-white font-semibold flex items-center gap-2 disabled:opacity-50"
+                                style={speech?.lang === lang && speech.state === 'playing' ? { borderColor: 'var(--brand)', color: 'var(--brand)' } : undefined}>
+                          {speech?.lang === lang && speech.state === 'loading' ? <Loader2 size={16} className="animate-spin" /> : <Volume2 size={16} />} {label}
+                        </button>))}
+                      {speech?.state === 'playing' && (
+                        <button onClick={stopSpeech} className="min-h-11 px-4 rounded-xl border border-line bg-white flex items-center gap-2"><Square size={14} /> Stop</button>)}
+                    </div>
+                    {speech?.script && <p className="text-ink-2 italic">“{speech.script}”</p>}
+                    <p className="text-xs text-ink-3">Plain words only, no treatment advice. The voice says the doctor will explain the next steps.</p>
                   </div>
                 </>)}
               </section>

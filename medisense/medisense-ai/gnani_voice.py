@@ -13,6 +13,7 @@ import re
 import time
 import unicodedata
 from collections import defaultdict
+from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
@@ -66,6 +67,20 @@ def _get_client() -> httpx.AsyncClient:
 _gnani_lock = asyncio.Lock()
 
 
+# Running totals since the server started, so a manager can watch Gnani usage (credits) and latency.
+STATS = {"since": time.time(),
+         "prisma": {"calls": 0, "errors": 0, "audio_kb": 0, "ms_total": 0},
+         "timbre": {"calls": 0, "errors": 0, "chars": 0, "ms_total": 0}}
+
+
+def _count(service: str, ok: bool, ms: int) -> None:
+    st = STATS[service]
+    st["calls"] += 1
+    st["ms_total"] += ms
+    if not ok:
+        st["errors"] += 1
+
+
 class GnaniError(Exception):
     """Raised when Prisma/Timbre cannot do the job; `status` is the HTTP status to report."""
 
@@ -92,8 +107,10 @@ async def _post(path: str, ms_key: str, timings: dict | None, **kwargs) -> httpx
             if r.status_code != 429:
                 break
             await asyncio.sleep(0.3 * (2 ** attempt))   # 0.3s, 0.6s, 1.2s, 2.4s
+        elapsed = round((time.perf_counter() - t0) * 1000)
         if timings is not None:
-            timings[ms_key] = round((time.perf_counter() - t0) * 1000)
+            timings[ms_key] = elapsed
+        _count("prisma" if path.startswith("/stt") else "timbre", r.status_code == 200, elapsed)
     return r
 
 
@@ -117,6 +134,7 @@ async def synthesize(text: str, language: str | None = None, voice: str | None =
                          "encoding": "linear_pcm", "container": "mp3", "bitrate": "64k"},
     }
     r = await _post("/api/v1/tts/inference", "timbre_ms", timings, json=body)
+    STATS["timbre"]["chars"] += len(text)
     if r.status_code == 200:
         return r.content
     # 401/402/403 etc. are our problem (key/credits), not the user's: report as 502.
@@ -150,6 +168,7 @@ async def transcribe(audio: bytes, timings: dict | None = None) -> dict:
         files={"audio_file": ("speech.wav", audio, "audio/wav")},
         data={"model": PRISMA_MODEL, "language_code": PRISMA_LANGS, "format": PRISMA_FORMAT},
     )
+    STATS["prisma"]["audio_kb"] += len(audio) // 1024
     if r.status_code == 200:
         body = r.json()
         return {"transcript": (body.get("transcript") or "").strip(),
@@ -202,6 +221,18 @@ def rate_limit(request: Request, bucket: str = "speech", limit: int = RATE_LIMIT
 # ───────────────────────────── Routes ─────────────────────────────
 
 router = APIRouter()
+
+
+@router.get("/api/voice/stats")
+def voice_stats():
+    """Gnani usage since the server started (managers and owners only; see authz.py)."""
+    out = {"status": "success", "since": datetime.utcfromtimestamp(STATS["since"]).isoformat() + "Z",
+           "cached_clips": {"fillers": len(_filler_audio), "emergency": len(_emergency_audio)}}
+    for name in ("prisma", "timbre"):
+        st = dict(STATS[name])
+        st["avg_ms"] = round(st["ms_total"] / st["calls"]) if st["calls"] else 0
+        out[name] = st
+    return out
 
 
 async def _transcribe_upload(audio: UploadFile) -> dict:

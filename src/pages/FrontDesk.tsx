@@ -3,7 +3,8 @@
 //   mic -> Prisma (transcript)  ->  cached filler plays at once  ->  /checkin streams the spoken
 //   reply sentence by sentence  ->  token number on screen and in the receptionist's queue.
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Mic, Loader2, Siren, CheckCircle2 } from 'lucide-react'
+import { Mic, Loader2, Siren, CheckCircle2, Languages } from 'lucide-react'
+import { QRCodeSVG } from 'qrcode.react'
 import { API_URL } from '../utils/config'
 import useVoiceInput from '../hooks/useVoiceInput'
 
@@ -48,6 +49,7 @@ export default function FrontDesk() {
   const [ticket, setTicket] = useState<Ticket | null>(null)
   const [symptom, setSymptom] = useState('')
   const [message, setMessage] = useState('')
+  const [heard, setHeard] = useState('')                 // the language the patient spoke, shown as a small chip
   const [timings, setTimings] = useState<Record<string, number> | null>(null)
   const fillers = useRef<Clips>({})
   const acks = useRef<Clips>({})
@@ -124,6 +126,7 @@ export default function FrontDesk() {
     onTranscript: async (text, _lang, x) => {
       marks.current = { recordEnd: x.recordEnd, prismaDone: x.prismaDone }
       setTranscript(text); setEmergency(x.emergency); setPhase('thinking')
+      setHeard(({ 'hi-IN': 'Hindi', 'hi-en': 'Hinglish', 'en-IN': 'English' } as Record<string, string>)[x.replyLanguage] || '')
       // Play a cached clip THIS instant: the urgent line for emergencies, a "one moment" filler otherwise.
       const clip = (x.emergency ? acks.current : fillers.current)[x.replyLanguage]
       if (clip) player.current!.play(clip, x.emergency ? 'reply' : 'filler')
@@ -136,7 +139,7 @@ export default function FrontDesk() {
 
   const reset = () => {
     player.current!.clear(); setPhase('idle'); setTranscript(''); setTicket(null)
-    setEmergency(false); setSymptom(''); setMessage(''); setTimings(null)
+    setEmergency(false); setSymptom(''); setMessage(''); setTimings(null); setHeard('')
   }
   const onMic = () => {
     if (voice.listening) { voice.stop(); return }
@@ -189,7 +192,8 @@ export default function FrontDesk() {
       {transcript && (
         <blockquote style={{ maxWidth: 560, margin: 0, background: 'var(--surface-color, #fff)', borderRadius: 16,
                              padding: '14px 18px', fontSize: 20, boxShadow: 'var(--shadow-sm)' }}>
-          “{transcript}”{symptom && <div style={{ fontSize: 14, color: 'var(--ink-2, #6e6e73)', marginTop: 6 }}>Noted: {symptom}</div>}
+          {heard && <div className="inline-flex items-center gap-1 text-xs font-semibold mb-2 px-2 py-0.5 rounded-full bg-brand-tint text-brand"><Languages size={12} /> Heard in {heard}</div>}
+          <div>“{transcript}”</div>{symptom && <div style={{ fontSize: 14, color: 'var(--ink-2, #6e6e73)', marginTop: 6 }}>Noted: {symptom}</div>}
         </blockquote>
       )}
 
@@ -200,6 +204,10 @@ export default function FrontDesk() {
           <div style={{ fontSize: 18, color: 'var(--ink-2, #6e6e73)' }}>Your token number</div>
           <div style={{ fontSize: 88, fontWeight: 800, lineHeight: 1, color: accent }}>{ticket.token}</div>
           <div style={{ fontSize: 18 }}>{emergency ? 'Staff will see you first.' : 'Please take a seat near reception.'}</div>
+          <div style={{ marginTop: 14, display: 'inline-block', padding: 8, background: '#fff', borderRadius: 12, border: '1px solid var(--line, #d2d2d7)' }} aria-label={`QR code for ticket ${ticket.ticket_number}`}>
+            <QRCodeSVG value={ticket.ticket_number} size={96} />
+          </div>
+          <div style={{ fontSize: 12, color: 'var(--ink-3, #86868b)', marginTop: 4 }}>{ticket.ticket_number}</div>
         </section>
       )}
 

@@ -25,7 +25,8 @@ import {
   FlaskConical,
   Trash2,
   AlertTriangle,
-  BedDouble
+  BedDouble,
+  Mic
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react'
 import WardBoard from '../components/WardBoard'
@@ -1622,7 +1623,12 @@ export default function Receptionist() {
                                                         <div className="flex gap-4 font-mono text-[10px] text-ink-3 uppercase tracking-widest">
                                                             <span>TKT {item.ticket_number}</span>
                                                             <span>{item.department || 'General'}</span>
-                                                            {item.notes && <span className="text-ink-2 normal-case not-italic font-sans text-xs truncate max-w-[200px]">{item.notes}</span>}
+                                                            {item.notes?.startsWith('Voice check-in') && (
+                                                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-brand-tint text-brand font-sans text-[11px] normal-case not-italic font-semibold" title="Checked in by voice at the kiosk">
+                                                                    <Mic size={11} /> Voice
+                                                                </span>
+                                                            )}
+                                                            {item.notes && <span className="text-ink-2 normal-case not-italic font-sans text-xs truncate max-w-[260px]">{item.notes.replace(/^Voice check-in:\s*/, '')}</span>}
                                                         </div>
                                                     </div>
                                                     <div className="text-right">

@@ -525,6 +525,40 @@ async def handle_pending(session: dict, question: str):
             "answer": answer, "patient_id": pending["payload"]["patient_id"]}
 
 
+# ── BED AVAILABILITY (voice) ──
+# "How many ICU beds are free?" is answered straight from the ward data: exact, instant, no model involved.
+import re as _re_beds   # (the shared alias _re_fast is only imported further down this file)
+_BED_QUERY = _re_beds.compile(
+    r"\b(free|empty|vacant|available|availability|how many|any|occupancy|occupied)\b.*\bbeds?\b"
+    r"|\bbeds?\b.*\b(free|empty|vacant|available|left|occupied|occupancy)\b|\bbed (availability|status)\b", _re_beds.I)
+
+
+_run_in_thread = asyncio.to_thread   # voice_query has a local `import asyncio` further down, so it cannot use `asyncio.` early
+
+
+def bed_availability_answer(question: str) -> str:
+    hospital = scoped_hospital_id(None)
+    wq = supabase.table("wards").select("id,name,type")
+    bq = supabase.table("beds").select("ward_id,status")
+    if hospital:
+        wq, bq = wq.eq("hospital_id", hospital), bq.eq("hospital_id", hospital)
+    wards, beds = wq.execute().data or [], bq.execute().data or []
+    if not wards:
+        return "This hospital has no wards set up yet."
+    q = question.lower()
+    asked = [w for w in wards if (w.get("type") or "").lower() in q or (w.get("name") or "").lower() in q]
+    rows = []
+    for w in (asked or wards):
+        mine = [b for b in beds if b.get("ward_id") == w["id"]]
+        rows.append((w["name"], sum(1 for b in mine if b.get("status") == "empty"), len(mine)))
+    if asked:
+        return " ".join(f"{n} has {free} free bed{'s' if free != 1 else ''} out of {total}." for n, free, total in rows)
+    free_all = sum(1 for b in beds if b.get("status") == "empty")
+    occupied = sum(1 for b in beds if b.get("status") == "occupied")
+    parts = ", ".join(f"{n} {free} of {total}" for n, free, total in rows[:6])
+    return f"{free_all} of {len(beds)} beds are free and {occupied} {'is' if occupied == 1 else 'are'} occupied. By ward: {parts}."
+
+
 # ── ACTIVE CONSULTATION ──
 # Who each doctor is seeing right now. Keyed by doctor_id, never by session:
 # a session id is chosen by the client, so two doctors sharing one would
@@ -1176,8 +1210,8 @@ def api_health():
     return {"status": "ok"}
 
 # ── TEXT TO SPEECH (Atlas voice) ──
-# The ElevenLabs key lives here, not in the browser bundle: the frontend posts
-# the text and gets the audio stream back through this proxy.
+# Gnani Timbre speaks for Atlas. The key lives on the server, not in the browser bundle: the frontend
+# posts the text and gets MP3 audio back from /api/tts.
 import gnani_voice  # Timbre (TTS) + Prisma (STT) client; the key stays server-side
 
 @fastapi_app.post("/api/tts")
@@ -3177,6 +3211,12 @@ async def voice_query(data: dict):
     # --- PHASE 3: ADMISSION INTENT DETECTION ---
     admit_keywords = ["admit", "admitted", "admission", "hospitalize", "hospitalise", "needs to stay", "keep him", "keep her", "admit him", "admit her", "needs admission", "ward admission"]
     is_admit = any(word in question.lower() for word in admit_keywords) and patient_id is not None
+    is_bed_query = (not is_admit) and bool(_BED_QUERY.search(question or ""))
+
+    if is_bed_query:
+        answer = await _run_in_thread(bed_availability_answer, question)
+        remember_exchange(session, question, answer)
+        return {"status": "success", "intent": "bed_availability", "answer": answer, "patient_id": patient_id}
 
     if is_admit:
         # Extract section/ward from query
@@ -3961,16 +4001,21 @@ async def voice_query_stream(data: dict):
     admit_keywords = ["admit", "admitted", "admission", "hospitalize", "hospitalise", "needs to stay", "keep him", "keep her", "admit him", "admit her", "needs admission", "ward admission"]
     is_admit = any(word in question.lower() for word in admit_keywords) and patient_id is not None
 
-    # For admit and test-order, delegate to the non-streaming endpoint and wrap result as SSE
-    if is_admit or is_test_order:
+    is_bed_query = (not is_admit) and bool(_BED_QUERY.search(question or ""))
+
+    # For admit, test-order and bed questions, delegate to the non-streaming endpoint and wrap result as SSE
+    if is_admit or is_test_order or is_bed_query:
         try:
             result = await voice_query(data)
             def _instant():
                 yield _sse_event("done", result)
             return StreamingResponse(_instant(), media_type="text/event-stream")
         except Exception as e:
+            # Build the message NOW: Python deletes `e` when this block ends, and the generator below runs later
+            # (it used to raise NameError and hide the real error).
+            failure = f"Something went wrong (ref {error_ref(e)})"
             def _err():
-                yield _sse_event("error", {"message": f"Something went wrong (ref {error_ref(e)})"})
+                yield _sse_event("error", {"message": failure})
             return StreamingResponse(_err(), media_type="text/event-stream")
 
     intent_data = await detect_intent_async(question)
