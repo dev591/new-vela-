@@ -16,5 +16,5 @@ python-engineio==4.13.1
 bcrypt
 scikit-learn==1.6.1
 numpy==2.2.0
-
 reportlab>=4.0
+pillow

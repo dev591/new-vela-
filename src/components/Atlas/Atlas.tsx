@@ -11,7 +11,7 @@ interface Props {
 
 export default function Atlas({ currentPatientId, userRole }: Props) {
   const navigate = useNavigate()
-  const { state, question, answer, streamingText, showAnswer, errorMsg, setShowAnswer, stop, ask, toggleVoice } = useAtlas(currentPatientId, userRole)
+  const { state, question, answer, streamingText, showAnswer, errorMsg, micOn, micUsed, setShowAnswer, stop, ask, toggleVoice } = useAtlas(currentPatientId, userRole)
   const [query, setQuery] = useState("")
 
   // Orb click: talk when idle, send when listening, interrupt when busy.
@@ -30,9 +30,10 @@ export default function Atlas({ currentPatientId, userRole }: Props) {
 
   const busy = state === "speaking" || state === "processing" || state === "streaming"
   const status =
-    state === "listening" || state === "waking" ? "Listening… tap the orb or press Space to send"
+    state === "listening" || state === "waking" ? "Listening… just talk · Space mutes"
     : state === "processing" ? "Thinking…"
-    : state === "streaming" || state === "speaking" ? "Answering… tap the orb to stop"
+    : state === "streaming" || state === "speaking" ? "Answering… Space or tap the orb to interrupt"
+    : !micOn && micUsed ? "Mic muted · press Space to talk"
     : ""
   const canSend = query.trim().length > 0 && !busy
   const submit = () => {

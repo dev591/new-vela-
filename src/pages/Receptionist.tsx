@@ -24,9 +24,11 @@ import {
   Search,
   FlaskConical,
   Trash2,
-  AlertTriangle
+  AlertTriangle,
+  BedDouble
 } from 'lucide-react';
 import { QRCodeSVG } from 'qrcode.react'
+import WardBoard from '../components/WardBoard'
 import { Html5QrcodeScanner } from 'html5-qrcode'
 
 type Patient = {
@@ -63,7 +65,8 @@ export default function Receptionist() {
   const formRef = useRef<HTMLFormElement>(null)
   const queueRef = useRef<HTMLDivElement>(null)
 
-  const [activeTab, setActiveTab] = useState<'register' | 'lookup' | 'appointments' | 'tests' | 'catalog' | 'admissions' | 'queue' | 'doctors'>('register')
+  const [activeTab, setActiveTab] = useState<'register' | 'lookup' | 'appointments' | 'tests' | 'catalog' | 'admissions' | 'wards' | 'queue' | 'doctors'>('register')
+  const [wardRefresh, setWardRefresh] = useState(0)   // bump to reload the ward board after a discharge
   const [sidebarExpanded, setSidebarExpanded] = useState(false)
 
   const [registerForm, setRegisterForm] = useState({
@@ -593,6 +596,9 @@ export default function Receptionist() {
           if (admData.status === 'success') setActiveAdmissions(admData.admissions)
           if (roomData.status === 'success') setRoomTypes(roomData.room_types)
           if (wardData.status === 'success') setWards(wardData.wards)
+          // Atlas requests are saved on the server, so they are still here after a refresh or if this screen was closed.
+          const board = await fetch(`${API_URL}/api/wards/board${hospitalId ? `?hospital_id=${hospitalId}` : ''}`).then(r => r.json()).catch(() => null)
+          if (board?.status === 'success') setRecommendedAdmissions(board.recommendations)
       } catch (err) {
           console.error(err)
       } finally {
@@ -723,6 +729,7 @@ export default function Receptionist() {
               toast.success("Patient Discharged Successfully")
               setDischargeConfirmed(true)
               fetchAdmissions()
+              setWardRefresh(k => k + 1)
           } else {
               toast.error(data.message || "Discharge failed")
           }
@@ -1257,6 +1264,7 @@ export default function Receptionist() {
             { label: 'Console', icon: Monitor, active: activeTab === 'register' || activeTab === 'lookup', onClick: () => setActiveTab('register') },
             { label: 'Queue', icon: Users, active: activeTab === 'queue', onClick: () => setActiveTab('queue') },
             { label: 'Doctors', icon: Stethoscope, active: activeTab === 'doctors', onClick: () => { setActiveTab('doctors'); fetchDoctorStats(); } },
+            { label: 'Wards', icon: BedDouble, active: activeTab === 'wards', onClick: () => setActiveTab('wards') },
             { label: 'Admissions', icon: Activity, active: activeTab === 'admissions', onClick: () => setActiveTab('admissions') },
             { label: 'Appointments', icon: Calendar, active: activeTab === 'appointments', onClick: () => setActiveTab('appointments') },
             { label: 'Tests & Payments', icon: CreditCard, active: activeTab === 'tests', onClick: () => setActiveTab('tests') },
@@ -1627,6 +1635,14 @@ export default function Receptionist() {
                                         })}
                                     </div>
                                 )}
+                            </div>
+                        )}
+
+                        {activeTab === 'wards' && (
+                            <div className="animate-in fade-in slide-in-from-bottom-4 duration-500">
+                                <h3 className="text-3xl font-semibold text-ink mb-6">Wards and beds</h3>
+                                <WardBoard hospitalId={hospitalId || undefined} canAdmit refreshKey={wardRefresh}
+                                           onDischarge={(a) => handleInitiateDischarge(a as unknown as Admission)} />
                             </div>
                         )}
 

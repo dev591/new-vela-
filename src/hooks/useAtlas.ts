@@ -8,6 +8,8 @@ export function useAtlas(patientId?: string, userRole?: string | null) {
   const [streamingText, setStreamingText] = useState("")
   const [showAnswer, setShowAnswer] = useState(false)
   const [errorMsg, setErrorMsg] = useState("")
+  const [micOn, setMicOn] = useState(false)          // always-listening mic is open
+  const [micUsed, setMicUsed] = useState(false)      // it has been switched on at least once (so "muted" can be shown)
 
   const coreRef = useRef<AtlasCore | null>(null)
   const dismissTimer = useRef<any>(null)
@@ -15,6 +17,7 @@ export function useAtlas(patientId?: string, userRole?: string | null) {
   useEffect(() => {
     const core = new AtlasCore({
       onState: setState,
+      onMic: (on) => { setMicOn(on); if (on) setMicUsed(true) },
       onToken: (token) => {
         setStreamingText(prev => prev + token)
         // Show the answer card on the very first token
@@ -68,6 +71,8 @@ export function useAtlas(patientId?: string, userRole?: string | null) {
     streamingText,
     showAnswer,
     errorMsg,
+    micOn,
+    micUsed,
     setShowAnswer,
     stop,
     ask,

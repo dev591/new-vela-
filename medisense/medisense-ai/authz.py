@@ -82,6 +82,10 @@ POLICY: Dict[tuple, Rule] = {
     ("POST", "/api/network/doctors/auth/login"): _PUB,
     ("POST", "/api/patient/login"): _PUB,
     ("POST", "/api/patient/self-register"): _PUB,
+    ("POST", "/api/frontdesk/transcribe"): _PUB,      # voice kiosk; all three rate limited in gnani_voice.py
+    ("POST", "/api/frontdesk/checkin"): _PUB,         # creates a ticket for the fixed demo patient only
+    ("GET", "/api/frontdesk/warm"): _PUB,
+    ("POST", "/api/stt"): r(ANY_SESSION),             # speech-to-text for signed-in screens
     ("POST", "/api/demo/login-patient"): _PUB,
 
     # Session housekeeping
@@ -171,6 +175,14 @@ POLICY: Dict[tuple, Rule] = {
     # Hospital / wards / staff (management)
     ("GET", "/api/hospital/overview"): r(MANAGER),
     ("GET", "/api/wards"): r(HOSPITAL_STAFF),
+    ("GET", "/api/wards/board"): r(HOSPITAL_STAFF),
+    # Virtual consultation: a doctor opens a patient by VELA ID, even from another hospital (OTP approval comes later).
+    ("POST", "/api/virtual-consult/open"): r(DOCTOR),
+    ("POST", "/api/virtual-consult/analysis"): r(DOCTOR),
+    ("POST", "/api/virtual-consult/pdf"): r(DOCTOR),
+    ("POST", "/api/virtual-consult/file"): r(DOCTOR),
+    ("POST", "/api/admissions/recommended/{rec_id}/dismiss"): r(FRONT, MANAGER),
+    ("POST", "/api/admissions/{admission_id}/transfer"): r(RECEPTION, MANAGER),
     ("POST", "/api/wards"): r(MANAGER),
     ("POST", "/api/beds"): r(MANAGER),
     ("PUT", "/api/beds/{bed_id}/admit"): r(FRONT, MANAGER),

@@ -1,5 +1,7 @@
 import { API_URL } from "../../utils/config";
 import { getUser } from "../../utils/auth";
+import { VoiceRecorder, canRecord } from "../../utils/voiceRecorder";
+import { transcribe, SpeechError } from "../../utils/speech";
 
 export type AtlasState =
   | "sleeping"
@@ -15,6 +17,7 @@ interface Callbacks {
   onAnswer: (q: string, a: string) => void
   onToken: (token: string) => void
   onError: (msg: string) => void
+  onMic?: (on: boolean) => void      // microphone switched on (always listening) or muted
   userRole?: string
 }
 
@@ -26,6 +29,11 @@ class AtlasCore {
   private userRole: string = "doctor"
   private callbacks: Callbacks
   private SR: any = null
+  // Speech input now goes through Gnani Prisma (recorder -> /api/stt). The old browser
+  // Web Speech code below stays only as a fallback until the Gnani path is confirmed.
+  private recorder: VoiceRecorder | null = null
+  private micOn = false   // always-on: the mic stays open between questions until the user mutes it
+  private useGnani = canRecord()
   private isHoldingSpace = false
   private currentAudio: HTMLAudioElement | null = null  // active TTS playback, so stop() can halt it
   private interrupted = false                            // set by stop() so speakAnswer bails out
@@ -59,7 +67,7 @@ class AtlasCore {
     const SR = (window as any).SpeechRecognition
               || (window as any).webkitSpeechRecognition
 
-    if (!SR) {
+    if (!SR && !this.useGnani) {
       this.callbacks.onError("Use Chrome for voice")
       return
     }
@@ -88,6 +96,12 @@ class AtlasCore {
     e.preventDefault()
     e.stopPropagation()
     this.isHoldingSpace = true
+    if (this.useGnani) {
+      // Always-on mic: Space interrupts Atlas while it is busy, otherwise it mutes / unmutes the mic.
+      const busy = this.isSpeaking || ["speaking", "streaming", "processing"].includes(this.state)
+      if (busy) this.stop(); else this.toggleMic()
+      return
+    }
     if (this.isSpeaking || this.state === "speaking" || this.state === "streaming" || this.state === "processing") {
       this.stop()          // interrupt current answer/playback
     } else if (this.state === "listening") {
@@ -106,8 +120,93 @@ class AtlasCore {
     window.addEventListener("keyup", this.onKeyUp)
   }
 
+  // ── Always-on microphone ──
+  // The mic opens once and stays open. Every pause in speech ends an utterance, which is sent to Prisma and
+  // answered. While Atlas thinks or talks the mic is paused (so it never hears itself), then it resumes.
+  toggleMic() {
+    if (this.micOn) this.mute()
+    else void this.startAlwaysOn()
+  }
+
+  private mute() {
+    this.micOn = false
+    this.recorder?.cancel()
+    this.setState("sleeping")
+    this.callbacks.onMic?.(false)
+  }
+
+  private async startAlwaysOn() {
+    this.recorder?.cancel()
+    this.recorder = new VoiceRecorder({
+      continuous: true,            // keep the mic open after each utterance
+      silenceMs: 900,              // a slightly longer pause than the kiosk: doctors think while they talk
+      noSpeechMs: Infinity,        // never time out while waiting for the next question
+      maxMs: 25000,
+      onError: (m) => this.callbacks.onError(m),
+      onChunk: (wav) => { void this.handleUtterance(wav) },
+      onEnd: () => { if (this.micOn) { this.micOn = false; this.setState("sleeping"); this.callbacks.onMic?.(false) } },
+    })
+    await this.recorder.start()
+    if (!this.recorder.active) { this.setState("sleeping"); return }
+    this.micOn = true
+    this.setState("listening"); this.playWakeSound(); this.callbacks.onMic?.(true)
+  }
+
+  private async handleUtterance(wav: Blob) {
+    this.recorder?.pause()                       // do not listen while we think and speak
+    this.setState("processing")
+    try {
+      const { transcript } = await transcribe(wav)
+      console.log("[Atlas] heard:", transcript)
+      const query = transcript.toLowerCase().replace(/hey atlas[,\s]*/gi, "").replace(/^atlas[,\s]*/gi, "").trim()
+      if (query.length > 1) await this.sendQuery(query)   // sendQuery resumes listening when the answer is done
+      else this.resumeListening()                          // noise or silence: just keep listening
+    } catch (e) {
+      if (e instanceof SpeechError && e.status >= 502 && this.SR) {
+        this.useGnani = false; this.mute()                 // Gnani is down: fall back to browser speech
+        this.callbacks.onError("Switched to browser voice. Press Space and speak.")
+        return
+      }
+      this.callbacks.onError((e as Error).message || "I couldn't hear that.")
+      this.resumeListening()
+    }
+  }
+
+  private resumeListening() {
+    if (this.micOn && this.recorder?.active) { this.recorder.resume(); this.setState("listening") }
+  }
+
+  // Gnani path: record until the user stops talking (or 30 s), send the WAV to Prisma,
+  // then treat the transcript exactly like the old Web Speech result.
+  private async startListeningGnani() {
+    this.recorder?.cancel()
+    this.recorder = new VoiceRecorder({
+      onError: (m) => { this.callbacks.onError(m); this.setState("sleeping") },
+      onChunk: async (wav) => {
+        this.setState("processing")
+        try {
+          const { transcript } = await transcribe(wav)
+          console.log("[Atlas] heard:", transcript)
+          // Same wake-word clean-up as before, on a lowercase copy.
+          const query = transcript.toLowerCase().replace(/hey atlas[,\s]*/gi, "").replace(/^atlas[,\s]*/gi, "").trim()
+          if (query.length > 1) this.sendQuery(query)
+          else this.setState("sleeping")
+        } catch (e) {
+          // 502/503 = Gnani not reachable or not configured: use browser speech from now on.
+          if (e instanceof SpeechError && e.status >= 502 && this.SR) this.useGnani = false
+          this.callbacks.onError((e as Error).message || "I couldn't hear that.")
+          this.setState("sleeping")
+        }
+      },
+    })
+    await this.recorder.start()
+    if (this.recorder.active) { this.setState("listening"); this.playWakeSound() }
+    else this.setState("sleeping")
+  }
+
   private startListening() {
     if (this.isSpeaking) return
+    if (this.useGnani) { void this.startListeningGnani(); return }
 
     // Never run two recognitions at once — Chrome errors the first one out.
     if (this.recognition) {
@@ -187,6 +286,7 @@ class AtlasCore {
   }
 
   private stopListening() {
+    if (this.useGnani && this.recorder?.active) { this.recorder.stop(); return }   // sends what was said
     if (this.recognition && this.state === "listening") {
       console.log("[Atlas] stopping — processing query")
       this.setState("processing")
@@ -230,6 +330,7 @@ class AtlasCore {
   private async sendQuery(query: string, retryCount = 0): Promise<void> {
     this.setState("processing")
     try { this.recognition?.abort() } catch {}
+    if (this.micOn) this.recorder?.pause(); else this.recorder?.cancel()
 
     // Abort any previous stream
     if (this.streamAbort) {
@@ -367,6 +468,7 @@ class AtlasCore {
       if (this.streamAbort === controller) {
         this.streamAbort = null
       }
+      this.resumeListening()      // always-on: the answer is done, listen for the next question
     }
   }
 
@@ -566,6 +668,10 @@ class AtlasCore {
 
   // Click-to-talk: spacebar-independent voice path (orb click).
   toggleListening() {
+    if (this.useGnani) {
+      if (!(this.isSpeaking || ["speaking", "streaming", "processing"].includes(this.state))) this.toggleMic()
+      return
+    }
     if (!this.SR) {
       this.callbacks.onError("Use Chrome for voice")
       return
@@ -601,11 +707,13 @@ class AtlasCore {
     if (this.recognition) {
       try { this.recognition.abort() } catch {}
     }
+    if (!this.micOn) this.recorder?.cancel()      // always-on: an interrupt keeps the mic open
     if (this.streamAbort) {
       this.streamAbort.abort()
       this.streamAbort = null
     }
     this.setState("sleeping")
+    this.resumeListening()
   }
 
   destroy() {
@@ -621,6 +729,8 @@ class AtlasCore {
       try { this.recognition.abort() } catch {}
       this.recognition = null
     }
+    this.micOn = false
+    this.recorder?.cancel()
     if (this.streamAbort) {
       this.streamAbort.abort()
       this.streamAbort = null

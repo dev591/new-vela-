@@ -5,6 +5,8 @@ import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import toast from "react-hot-toast";
+import { listenOnce } from '../utils/speech'
+import { canRecord } from '../utils/voiceRecorder'
 import { QRCodeSVG } from 'qrcode.react';
 import mapboxgl from 'mapbox-gl';
 import useSocket, { type SocketEventPayload } from "../hooks/useSocket";
@@ -491,6 +493,9 @@ const PatientDashboard = () => {
   }, [activeTab, patient]);
 
   const initVoice = (onResult: (text: string) => void, onEnd: () => void) => {
+    // Gnani Prisma: record in the browser, transcribe on our backend (/api/stt).
+    // The Web Speech code below is the old fallback, kept until Gnani is confirmed.
+    if (canRecord()) return listenOnce(onResult, onEnd, (m) => toast.error(m));
     const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
     if (!SR) {
       toast.error("Speech recognition not supported in this browser");

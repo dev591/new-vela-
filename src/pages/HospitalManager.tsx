@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
+import WardBoard from '../components/WardBoard';
 import { 
   Search, Activity, Users, Plus, X, 
   Map as MapIcon, BarChart, Clock, 
@@ -116,7 +117,7 @@ export default function HospitalManager() {
   const [loginPassword, setLoginPassword] = useState('');
   const [loginLoading, setLoginLoading] = useState(false);
   const socket = useMemo(() => io(SOCKET_URL), []);
-  const [activeTab, setActiveTab] = useState<'overview' | 'map' | 'staff' | 'analytics' | 'config' | 'staff_mgmt' | 'command'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'map' | 'beds' | 'staff' | 'analytics' | 'config' | 'staff_mgmt' | 'command'>('overview');
   const [hospitalId, setHospitalId] = useState(localStorage.getItem('vela_hospital_id') || '');
   const [hospitalName, setHospitalName] = useState(localStorage.getItem('vela_hospital_name') || '');
   const [managerName, setManagerName] = useState(localStorage.getItem('vela_manager_name') || '');
@@ -581,6 +582,7 @@ export default function HospitalManager() {
             {[
               { id: 'overview', icon: BarChart, label: 'Performance' },
               { id: 'map', icon: MapIcon, label: 'Ward Map' },
+              { id: 'beds', icon: Bed, label: 'Beds & Patients' },
               { id: 'staff_mgmt', icon: Users, label: 'Personnel' },
               { id: 'command', icon: Activity, label: 'Command Center' },
             ].map((tab) => (
@@ -726,6 +728,13 @@ export default function HospitalManager() {
             </div>
           </div>
         )}
+
+          {activeTab === 'beds' && (
+            <div className="max-w-[1400px] mx-auto pb-12">
+              {/* Read-only for the manager: reception admits, transfers and discharges. */}
+              <WardBoard hospitalId={hospitalId || undefined} />
+            </div>
+          )}
 
           {activeTab === 'map' && (
             <div className="h-full w-full bg-white rounded-3xl border border-line shadow-sm overflow-hidden relative">

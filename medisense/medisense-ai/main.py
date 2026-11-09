@@ -1,6 +1,6 @@
 from fastapi import FastAPI, UploadFile, File, Form, Depends
 from fastapi.responses import FileResponse
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from mem0 import MemoryClient
@@ -112,7 +112,22 @@ def init_local_db():
         reason TEXT,
         recommended_by TEXT,
         room_type TEXT,
-        admission_qr TEXT
+        admission_qr TEXT,
+        ward_id TEXT,
+        admitted_by TEXT
+    )
+    """)
+
+    # Atlas admission requests waiting for reception. Kept in the database (not just in a socket
+    # event) so reception still sees them if the screen was closed when the doctor asked.
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS admission_recommendations (
+        id TEXT PRIMARY KEY,
+        hospital_id TEXT,
+        patient_id TEXT,
+        payload TEXT,                   -- JSON: ward, bed, reason, priority, doctor
+        status TEXT DEFAULT 'pending',  -- pending | admitted | dismissed | superseded
+        created_at TEXT
     )
     """)
     
@@ -315,6 +330,9 @@ def init_local_db():
                 cursor.execute(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")
                 print(f"🔧 Migrated {table}: +{col}")
 
+    # confirm_admission has always inserted ward_id, but the table never had it, so every admission failed.
+    _add_columns("admissions", {"ward_id": "TEXT", "admitted_by": "TEXT"})
+
     _add_columns("test_orders", {
         "department": "TEXT DEFAULT 'pathology'",   # routed lab (lab_catalog)
         "sample_type": "TEXT",
@@ -441,6 +459,72 @@ conversation_history = defaultdict(lambda: {
     "current_patient_name": None
 })
 
+# ── FOLLOW-UP MEMORY ──
+# When Atlas asks "Shall I notify the receptionist?" the next thing the doctor says is "okay". That
+# only makes sense if Atlas remembers it asked. The question is kept per session, for a few minutes.
+PENDING_TTL = 300   # seconds
+_YES = ("yes", "yeah", "yep", "yup", "ok", "okay", "sure", "go ahead", "do it", "please do", "confirm", "notify",
+        "send it", "haan", "han", "ha", "haanji", "ji haan", "theek hai", "thik hai", "kar do", "bilkul",
+        "हाँ", "हां", "जी", "ठीक है", "कर दो", "बिल्कुल")
+_NO = ("no", "nope", "nah", "cancel", "dont", "do not", "stop", "never mind", "nevermind", "wait",
+       "nahi", "nahin", "mat", "नहीं", "मत", "रहने दो")
+
+
+def remember_exchange(session: dict, question: str, answer: str) -> None:
+    """Save one question/answer pair so later questions ("why?", "okay") have context."""
+    session["messages"].append({"role": "user", "content": question})
+    session["messages"].append({"role": "assistant", "content": answer})
+    session["messages"] = session["messages"][-10:]
+
+
+def yes_or_no(text: str):
+    """'yes' / 'no' for a short spoken reply, else None (so a real new question is not swallowed)."""
+    norm = gnani_voice.normalize(text or "")
+    if not norm or len(norm.split()) > 6:
+        return None
+    padded = f" {norm} "
+    if any(f" {w} " in padded for w in _NO):      # "no" wins: "no, don't" must never count as yes
+        return "no"
+    if any(f" {w} " in padded for w in _YES):
+        return "yes"
+    return None
+
+
+async def handle_pending(session: dict, question: str):
+    """If Atlas is waiting for a yes/no, act on it. Returns the reply dict, or None to carry on as normal."""
+    pending = session.get("pending")
+    if not pending:
+        return None
+    if time.time() > pending["expires"]:
+        session["pending"] = None
+        return None
+    verdict = yes_or_no(question)
+    if verdict is None:
+        return None                               # not an answer: treat it as a new question
+    session["pending"] = None
+    if verdict == "no":
+        answer = "Okay, I won't notify reception."
+    else:                                         # yes: NOW tell reception, and the patient
+        payload = dict(pending["payload"])
+        hospital = authz.session_hospital_id() or None
+        rec_id = str(uuid.uuid4())
+        payload["rec_id"], payload["hospital_id"] = rec_id, hospital
+        # Save it first: the request must survive a closed reception screen or a restart.
+        local_execute("UPDATE admission_recommendations SET status='superseded' WHERE patient_id=? AND status='pending'",
+                      (payload["patient_id"],))
+        local_execute("INSERT INTO admission_recommendations (id, hospital_id, patient_id, payload, status, created_at) "
+                      "VALUES (?, ?, ?, ?, 'pending', ?)",
+                      (rec_id, hospital, payload["patient_id"], json.dumps(payload), datetime.utcnow().isoformat()))
+        await sio.emit("admission_recommended", payload)
+        await sio.emit("admission_recommended_patient", {"patient_id": payload["patient_id"],
+                                                        "message": pending["patient_message"]})
+        answer = (f"Done. I've sent the request to reception: {payload['patient_name']} to {pending['summary']}. "
+                  f"It becomes final when the receptionist confirms the admission.")
+    remember_exchange(session, question, answer)
+    return {"status": "success", "intent": "admission_notified" if verdict == "yes" else "admission_cancelled",
+            "answer": answer, "patient_id": pending["payload"]["patient_id"]}
+
+
 # ── ACTIVE CONSULTATION ──
 # Who each doctor is seeing right now. Keyed by doctor_id, never by session:
 # a session id is chosen by the client, so two doctors sharing one would
@@ -559,7 +643,10 @@ ALLOWED_ORIGINS = [
     "http://localhost:3000",
     "https://velahealth.in",
     "https://www.velahealth.in",
-] + [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
+] + [
+    # Browsers send the origin without a trailing slash; tolerate "https://x.app/" in the env var.
+    o.strip().rstrip("/") for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()
+]
 
 class ScopedAsyncServer(socketio.AsyncServer):
     """Socket.IO server that never broadcasts to everyone.
@@ -754,6 +841,10 @@ PUBLIC_API_PATHS = {
     # One-click demo patient login for the localhost presentation. Public by
     # necessity (no session exists yet) and self-disables when DEMO_LOGIN=false.
     "/api/demo/login-patient",
+    # Voice kiosk: a visitor with no account speaks to the front desk. Rate limited per IP in gnani_voice.py.
+    "/api/frontdesk/transcribe",
+    "/api/frontdesk/checkin",
+    "/api/frontdesk/warm",
 }
 
 # OFF by default — it hands out a patient session with no credentials, so it
@@ -869,7 +960,8 @@ def spawn(coro) -> "asyncio.Task":
 # process; a multi-instance deployment should put this in Redis or the proxy.
 LOGIN_RATE_LIMIT = int(os.getenv("VELA_LOGIN_RATE_LIMIT", 10))      # attempts
 LOGIN_RATE_WINDOW = int(os.getenv("VELA_LOGIN_RATE_WINDOW", 300))   # seconds
-_RATE_LIMITED_PATHS = {p for p in PUBLIC_API_PATHS if p != "/api/health"}
+# The kiosk routes (/api/frontdesk/*) have their own, looser limiter in gnani_voice.py.
+_RATE_LIMITED_PATHS = {p for p in PUBLIC_API_PATHS if p != "/api/health" and not p.startswith("/api/frontdesk/")}
 _rate_hits: dict = defaultdict(list)
 TRUST_PROXY = os.getenv("VELA_TRUST_PROXY", "").lower() in ("1", "true", "yes")
 
@@ -896,6 +988,7 @@ _PHI_PREFIXES = (
     "/api/patients", "/api/patient/", "/api/atlas", "/api/documents", "/api/upload", "/api/lab/",
     "/api/emergency", "/api/voice", "/api/imaging", "/api/admissions", "/api/discharge",
     "/api/history", "/api/receptionist/lookup", "/api/visit-report", "/api/appointments/patient",
+    "/api/virtual-consult",     # cross-hospital record access: every call goes into the audit chain
 )
 
 def _is_phi_path(path: str) -> bool:
@@ -1085,45 +1178,20 @@ def api_health():
 # ── TEXT TO SPEECH (Atlas voice) ──
 # The ElevenLabs key lives here, not in the browser bundle: the frontend posts
 # the text and gets the audio stream back through this proxy.
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY") or ""
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID") or "21m00Tcm4TlvDq8ikWAM"
-TTS_MAX_CHARS = 2500
+import gnani_voice  # Timbre (TTS) + Prisma (STT) client; the key stays server-side
 
 @fastapi_app.post("/api/tts")
 async def text_to_speech(data: dict):
-    text = (data.get("text") or "").strip()[:TTS_MAX_CHARS]
-    if not text:
-        return _JSONResponse(status_code=400, content={"status": "error", "message": "Nothing to say"})
-    if not ELEVENLABS_API_KEY:
+    # Same request shape as before: {"text": "..."}. Optional "lang" ("hi-IN" | "hi-en" | "en-IN")
+    # picks the voice; without it Devanagari -> Hindi, anything else -> English.
+    timings: dict = {}
+    try:
+        audio = await gnani_voice.synthesize(data.get("text") or "", data.get("lang"), timings=timings)
+    except gnani_voice.GnaniError as e:
         # The client falls back to the browser's own voice on any non-200.
-        return _JSONResponse(status_code=503, content={"status": "error", "message": "Voice service not configured"})
-    client = _httpx.AsyncClient(timeout=_httpx.Timeout(30.0, connect=5.0))
-    upstream = await client.send(client.build_request(
-        "POST",
-        f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream",
-        headers={"xi-api-key": ELEVENLABS_API_KEY, "Accept": "audio/mpeg"},
-        json={
-            "text": text,
-            "model_id": "eleven_turbo_v2",
-            "voice_settings": {"stability": 0.4, "similarity_boost": 0.8, "style": 0.1, "use_speaker_boost": False},
-            "optimize_streaming_latency": 3,
-        },
-    ), stream=True)
-    if upstream.status_code != 200:
-        print(f"⚠️ ElevenLabs returned {upstream.status_code}")
-        await upstream.aclose()
-        await client.aclose()
-        return _JSONResponse(status_code=502, content={"status": "error", "message": "Voice service unavailable"})
-
-    async def _audio():
-        try:
-            async for chunk in upstream.aiter_bytes():
-                yield chunk
-        finally:
-            await upstream.aclose()
-            await client.aclose()
-
-    return StreamingResponse(_audio(), media_type="audio/mpeg")
+        return _JSONResponse(status_code=e.status, content={"status": "error", "message": str(e)})
+    print(f"⏱️  /api/tts timbre={timings.get('timbre_ms')}ms bytes={len(audio)}")
+    return Response(content=audio, media_type="audio/mpeg")
 
 mem0_client = None
 # mem0 held stale values that no uploaded file contains (e.g. creatinine 1.8, Hb 9.2),
@@ -2977,6 +3045,12 @@ async def voice_query(data: dict):
 
     session = conversation_history[session_id]
 
+    # A reply to Atlas's own question ("Shall I notify the receptionist?" -> "okay") is handled first.
+    if user_role != "Patient":
+        pending_reply = await handle_pending(session, question)
+        if pending_reply:
+            return pending_reply
+
     # Who is speaking, and who are they with? Resolved once, up front, so every
     # tier below can rely on it. The doctor's active consult is preferred over
     # the session because it is scoped to this doctor and survives a restart —
@@ -3139,49 +3213,64 @@ Return only JSON."""
         
         admit_data = json.loads(section_extraction.choices[0].message.content)
         
-        # Find matching ward
-        wards = supabase.table("wards").select("*, beds(*)").ilike("type", f"%{admit_data['ward_type']}%").execute()
-        
-        # Find empty bed in matching ward
-        recommended_ward = None
-        recommended_bed = None
-        
-        for ward in (wards.data or []):
-            empty_beds = [b for b in ward.get("beds", []) if b["status"] == "empty"]
-            if empty_beds:
-                recommended_ward = ward
-                recommended_bed = empty_beds[0]
+        # Only look at the caller's own hospital (this used to search every hospital's wards).
+        my_hospital = scoped_hospital_id(None)
+        ward_query = supabase.table("wards").select("*, beds(*)")
+        if my_hospital:
+            ward_query = ward_query.eq("hospital_id", my_hospital)
+        all_wards = ward_query.execute().data or []
+
+        def _empty(ward):
+            return [b for b in ward.get("beds", []) if b.get("status") == "empty"]
+
+        # Preference order: the requested ward type, then a General ward, then any ward with a free bed.
+        wanted = (admit_data.get("ward_type") or "General").lower()
+        by_type = [w for w in all_wards if wanted in (w.get("type") or "").lower()]
+        general = [w for w in all_wards if "general" in (w.get("type") or "").lower()]
+        recommended_ward = recommended_bed = None
+        used_fallback = False
+        for rank, ward in enumerate(by_type + general + all_wards):
+            if _empty(ward):
+                recommended_ward, recommended_bed = ward, _empty(ward)[0]
+                used_fallback = ward not in by_type
                 break
-        
+
         # Get patient name
         patient = supabase.table("patients").select("name").eq("id", patient_id).execute()
         patient_name = patient.data[0]["name"] if patient.data else "Patient"
         
+        reason = admit_data.get("reason", "As per doctor recommendation")
         if recommended_ward and recommended_bed:
-            answer = f"I recommend admitting {patient_name} to {recommended_ward['name']} ward, Bed {recommended_bed['bed_number']}. Reason: {admit_data.get('reason', 'As per doctor recommendation')}. Shall I notify the receptionist?"
+            where = f"{recommended_ward['name']} ward, Bed {recommended_bed['bed_number']}"
+            if used_fallback:    # be upfront that this is not the ward type the doctor asked for
+                answer = (f"No empty {admit_data['ward_type']} bed, but {where} is free. I recommend admitting "
+                          f"{patient_name} there. Reason: {reason}. Shall I notify the receptionist?")
+            else:
+                answer = f"I recommend admitting {patient_name} to {where}. Reason: {reason}. Shall I notify the receptionist?"
+        elif not all_wards:
+            answer = ("This hospital has no wards or beds set up yet. The hospital manager needs to add wards "
+                      "in the manager console before patients can be admitted.")
         else:
-            answer = f"No empty beds found in {admit_data['ward_type']} ward. Please check with receptionist for bed availability."
+            total = sum(len(w.get("beds", [])) for w in all_wards)
+            answer = f"All {total} beds in this hospital are occupied right now. Please check with the receptionist."
         
-        # Notify receptionist
-        await sio.emit("admission_recommended", {
-            "patient_id": patient_id,
-            "patient_name": patient_name,
-            "ward_type": admit_data["ward_type"],
-            "ward_id": recommended_ward["id"] if recommended_ward else None,
-            "ward_name": recommended_ward["name"] if recommended_ward else None,
-            "bed_id": recommended_bed["id"] if recommended_bed else None,
-            "bed_number": recommended_bed["bed_number"] if recommended_bed else None,
-            "reason": admit_data.get("reason"),
-            "priority": admit_data.get("priority", "routine"),
-            "doctor": user_role
-        })
-        
-        # Notify patient
-        await sio.emit("admission_recommended_patient", {
-            "patient_id": patient_id,
-            "message": f"Doctor has recommended admission to {admit_data['ward_type']} ward. Please proceed to reception."
-        })
-        
+        # Nothing is sent yet. The question above is real: reception and the patient are told only
+        # after the doctor says yes (handle_pending), so "no" or "wait" really cancels it.
+        if recommended_ward and recommended_bed:
+            session["pending"] = {
+                "expires": time.time() + PENDING_TTL,
+                "summary": f"{recommended_ward['name']} ward, Bed {recommended_bed['bed_number']}",
+                "payload": {
+                    "patient_id": patient_id, "patient_name": patient_name, "ward_type": admit_data["ward_type"],
+                    "ward_id": recommended_ward["id"], "ward_name": recommended_ward["name"],
+                    "bed_id": recommended_bed["id"], "bed_number": recommended_bed["bed_number"],
+                    "reason": admit_data.get("reason"), "priority": admit_data.get("priority", "routine"),
+                    "doctor": user_role,
+                },
+                "patient_message": f"Doctor has recommended admission to {recommended_ward['name']}. Please proceed to reception.",
+            }
+        remember_exchange(session, question, answer)
+
         return {
             "status": "success",
             "intent": "admission",
@@ -3189,7 +3278,8 @@ Return only JSON."""
             "patient_id": patient_id,
             "ward_type": admit_data["ward_type"],
             "recommended_ward": recommended_ward,
-            "recommended_bed": recommended_bed
+            "recommended_bed": recommended_bed,
+            "awaiting_confirmation": bool(recommended_bed),
         }
 
     if is_test_order:
@@ -3256,6 +3346,7 @@ Return only JSON. Nothing else."""
         )
 
         answer = _describe_created_orders(created_orders, patient_name)
+        remember_exchange(session, question, answer)
 
         return {
             "status": "success",
@@ -3754,6 +3845,13 @@ async def voice_query_stream(data: dict):
     user_role = data.get("user_role", "Doctor")
 
     session = conversation_history[session_id]
+
+    if user_role != "Patient":
+        pending_reply = await handle_pending(session, question)
+        if pending_reply:
+            def _instant_pending():
+                yield _sse_event("done", pending_reply)
+            return StreamingResponse(_instant_pending(), media_type="text/event-stream")
 
     # Who is speaking, and who are they with? Resolved once, up front, so every
     # tier below can rely on it. The doctor's active consult is preferred over
@@ -5583,6 +5681,123 @@ def get_wards(hospital_id: str = "VLA-MAIN"):
             
     return {"status": "success", "wards": wards}
 
+def _natural_key(text):
+    """Sort ICU-2 before ICU-10."""
+    return [int(t) if t.isdigit() else t.lower() for t in _re_fast.split(r"(\d+)", text or "")]
+
+
+@fastapi_app.get("/api/wards/board")
+def ward_board(hospital_id: str = ""):
+    """Everything the ward board needs in one call: wards with their beds, who is in each occupied bed
+    (patient + admission details), Atlas requests waiting for reception, and the totals."""
+    hospital_id = scoped_hospital_id(hospital_id)
+    if not hospital_id:
+        return {"status": "error", "message": "No hospital selected"}
+    wards = supabase_admin.table("wards").select("*").eq("hospital_id", hospital_id).execute().data or []
+    beds = supabase_admin.table("beds").select("*").eq("hospital_id", hospital_id).execute().data or []
+    staff = supabase_admin.table("vela_staff").select("id, name, role, ward_id").eq("hospital_id", hospital_id).eq("active", True).execute().data or []
+
+    active = merge_relations_for_admissions(local_query(
+        "SELECT * FROM admissions WHERE status = 'active' AND hospital_id = ?", (get_valid_hospital_id(hospital_id),)))
+    now = datetime.utcnow()
+
+    def describe(a):
+        p = a.get("patients") or {}
+        try:
+            since = datetime.fromisoformat(str(a["admitted_at"]).replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            since = now
+        days = max(1, -(-int((now - since).total_seconds()) // 86400))      # whole days, rounded up, at least 1
+        per_day = room_cost_per_day(a.get("room_type"))
+        return {
+            "id": a["id"], "patient_id": a.get("patient_id"), "bed_id": a.get("bed_id"), "ward_id": a.get("ward_id"),
+            "status": a.get("status"), "admitted_at": a.get("admitted_at"), "days": days, "room_type": a.get("room_type"),
+            "cost_per_day": per_day, "room_cost_so_far": days * per_day, "reason": a.get("reason"),
+            "admission_reason": a.get("reason"), "diagnosis": a.get("diagnosis"), "recommended_by": a.get("recommended_by"),
+            "admitted_by": a.get("admitted_by"), "admission_qr": a.get("admission_qr"),
+            # The same relation keys /api/admissions/active returns, so the discharge flow can use this object as is.
+            "patients": {k: p.get(k) for k in ("id", "name", "vela_id", "age", "gender", "blood_group", "allergies",
+                                              "existing_conditions", "risk_score", "phone", "emergency_contact", "diagnosis")},
+            "wards": {"name": (a.get("wards") or {}).get("name")}, "beds": {"bed_number": (a.get("beds") or {}).get("bed_number")},
+        }
+
+    by_bed = {a["bed_id"]: describe(a) for a in active if a.get("bed_id")}
+    out_wards, totals = [], {"total": 0, "occupied": 0, "empty": 0, "unavailable": 0}
+    for w in sorted(wards, key=lambda x: _natural_key(x.get("name"))):
+        wb = sorted([b for b in beds if b.get("ward_id") == w["id"]], key=lambda b: _natural_key(b.get("bed_number")))
+        for b in wb:
+            b["admission"] = by_bed.get(b["id"])
+            if b["admission"] and b.get("status") != "occupied":
+                b["status"] = "occupied"      # an active admission always wins over a stale bed row
+            st = b.get("status")
+            totals["total"] += 1
+            totals["occupied" if st == "occupied" else "empty" if st == "empty" else "unavailable"] += 1
+        w["beds"] = wb
+        w["staff"] = [x for x in staff if x.get("ward_id") == w["id"]]
+        out_wards.append(w)
+    totals["occupancy"] = round(100 * totals["occupied"] / totals["total"]) if totals["total"] else 0
+
+    # Atlas requests still waiting for reception (see handle_pending).
+    recs = []
+    in_bed_patients = {a["patient_id"] for a in active}
+    empty_ids = {b["id"] for b in beds if b.get("status") == "empty"}
+    for r in local_query("SELECT * FROM admission_recommendations WHERE status='pending' AND hospital_id = ? ORDER BY created_at DESC", (hospital_id,)):
+        payload = json.loads(r["payload"] or "{}")
+        if r["patient_id"] in in_bed_patients:
+            local_execute("UPDATE admission_recommendations SET status='admitted' WHERE id=?", (r["id"],))
+            continue
+        payload.update({"rec_id": r["id"], "created_at": r["created_at"], "bed_still_free": payload.get("bed_id") in empty_ids})
+        recs.append(payload)
+    return {"status": "success", "hospital_id": hospital_id, "wards": out_wards, "recommendations": recs,
+            "summary": totals, "room_types": STATIC_ROOM_TYPES}
+
+
+@fastapi_app.post("/api/admissions/recommended/{rec_id}/dismiss")
+def dismiss_recommendation(rec_id: str):
+    rows = local_query("SELECT hospital_id FROM admission_recommendations WHERE id = ?", (rec_id,))
+    mine = authz.session_hospital_id()
+    if not rows or (mine and rows[0]["hospital_id"] not in (None, mine)):
+        return {"status": "error", "message": "Request not found"}
+    local_execute("UPDATE admission_recommendations SET status='dismissed' WHERE id = ?", (rec_id,))
+    return {"status": "success"}
+
+
+@fastapi_app.post("/api/admissions/{admission_id}/transfer")
+async def transfer_admission(admission_id: str, data: dict):
+    """Move an admitted patient to another empty bed in the same hospital."""
+    new_bed_id = data.get("bed_id")
+    rows = local_query("SELECT * FROM admissions WHERE id = ? AND status = 'active'", (admission_id,))
+    if not rows:
+        return {"status": "error", "message": "Admission not found or already discharged"}
+    adm = rows[0]
+    new_bed = (supabase_admin.table("beds").select("*").eq("id", new_bed_id).execute().data or [None])[0]
+    if not new_bed:
+        return {"status": "error", "message": "That bed does not exist"}
+    my_hospital = authz.session_hospital_id()
+    if new_bed.get("hospital_id") != (my_hospital or new_bed.get("hospital_id")) or \
+       (adm.get("hospital_id") and new_bed.get("hospital_id") != adm.get("hospital_id")):
+        return {"status": "error", "message": "That bed belongs to another hospital"}
+    # Claim the new bed only if it is still empty, then free the old one.
+    claim = supabase_admin.table("beds").update({
+        "status": "occupied", "patient_id": adm["patient_id"], "admitted_at": adm.get("admitted_at")
+    }).eq("id", new_bed_id).eq("status", "empty").execute()
+    if not claim.data:
+        return {"status": "error", "message": "That bed was just taken. Please pick another one."}
+    old_bed_id = adm.get("bed_id")
+    if old_bed_id:
+        supabase_admin.table("beds").update({"status": "empty", "patient_id": None, "admitted_at": None}).eq("id", old_bed_id).execute()
+    local_execute("UPDATE admissions SET bed_id = ?, ward_id = ? WHERE id = ?", (new_bed_id, new_bed.get("ward_id"), admission_id))
+    ward = (supabase_admin.table("wards").select("name").eq("id", new_bed.get("ward_id")).execute().data or [{}])[0]
+    supabase_admin.table("patients").update({"ward": ward.get("name"), "room": new_bed.get("bed_number")}).eq("id", adm["patient_id"]).execute()
+    if old_bed_id:
+        await sio.emit("bed_status_changed", {"bed_id": old_bed_id, "status": "empty", "hospital_id": new_bed.get("hospital_id")})
+    await sio.emit("bed_status_changed", {"bed_id": new_bed_id, "status": "occupied", "hospital_id": new_bed.get("hospital_id")})
+    await sio.emit("admission_transferred", {"admission_id": admission_id, "patient_id": adm["patient_id"],
+                                             "ward_name": ward.get("name"), "bed_number": new_bed.get("bed_number"),
+                                             "hospital_id": new_bed.get("hospital_id")})
+    return {"status": "success", "ward_name": ward.get("name"), "bed_number": new_bed.get("bed_number")}
+
+
 @fastapi_app.post("/api/wards")
 def create_ward(data: dict):
     data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
@@ -5679,6 +5894,13 @@ async def discharge_patient(bed_id: str):
 @fastapi_app.put("/api/beds/{bed_id}/status")
 async def update_bed_status(bed_id: str, data: dict):
     new_status = data.get("status")
+    # Only these can be set by hand. Occupied/empty-after-stay changes go through admit and discharge,
+    # so a bed with a patient in it can never be switched off here.
+    if new_status not in ("empty", "maintenance", "cleaning"):
+        return {"status": "error", "message": "Unknown bed status"}
+    current = supabase_admin.table("beds").select("status").eq("id", bed_id).execute().data
+    if current and current[0].get("status") == "occupied":
+        return {"status": "error", "message": "This bed has a patient. Discharge or transfer them first."}
     result = supabase_admin.table("beds").update({"status": new_status}).eq("id", bed_id).execute()
     
     await sio.emit("bed_status_changed", {
@@ -7604,6 +7826,13 @@ STATIC_ROOM_TYPES = [
     {"id": "rt-4", "name": "ICU Room", "cost_per_day": 10000, "amenities": ["24/7 Monitoring", "Ventilator Support", "Specialist Care Included"]}
 ]
 
+def room_cost_per_day(room_type) -> int:
+    for rt in STATIC_ROOM_TYPES:
+        if rt["name"] == room_type:
+            return rt["cost_per_day"]
+    return 500
+
+
 def merge_relations_for_admissions(admissions):
     if not admissions:
         return []
@@ -7667,29 +7896,43 @@ async def confirm_admission(data: dict):
             cost = rt["cost_per_day"]
             break
             
-    # Fetch patient's hospital_id
-    patient_res = supabase.table("patients").select("hospital_id").eq("id", patient_id).execute()
-    p_hospital_id = patient_res.data[0].get("hospital_id") if patient_res.data else None
-    p_hospital_id = get_valid_hospital_id(p_hospital_id)
+    # Claim the bed first, and only if it is still empty (two receptionists could pick the same bed).
+    bed_rows = supabase.table("beds").select("hospital_id,status").eq("id", bed_id).execute().data
+    if not bed_rows:
+        return {"status": "error", "message": "That bed does not exist."}
+    my_hospital = authz.session_hospital_id()
+    if my_hospital and bed_rows[0].get("hospital_id") not in (None, my_hospital):
+        return {"status": "error", "message": "That bed belongs to another hospital."}
+    claim = supabase.table("beds").update({
+        "status": "occupied", "patient_id": patient_id, "admitted_at": datetime.utcnow().isoformat()
+    }).eq("id", bed_id).eq("status", "empty").execute()
+    if not claim.data:
+        return {"status": "error", "message": "That bed was just taken. Please pick another one."}
+
+    # The admission belongs to the hospital that owns the bed. (It used to come from the patient's
+    # hospital, and a patient with none was filed under an arbitrary first hospital.)
+    p_hospital_id = get_valid_hospital_id(bed_rows[0].get("hospital_id") or my_hospital)
     
     # STEP 3 — Create admission record locally
     admission_id = str(uuid.uuid4())
-    local_execute(
-        """INSERT INTO admissions (
-            id, patient_id, hospital_id, bed_id, ward_id, status, diagnosis, reason, recommended_by, room_type, admission_qr, admitted_at
-        ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?)""",
-        (
-            admission_id, patient_id, p_hospital_id, bed_id, ward_id, diagnosis, admission_reason,
-            recommended_by, room_type, admission_qr, datetime.utcnow().isoformat()
-        )
-    )
-    
-    # STEP 4 — Update bed status in Supabase
-    supabase.table("beds").update({
-        "status": "occupied",
-        "patient_id": patient_id,
-        "admitted_at": datetime.utcnow().isoformat()
-    }).eq("id", bed_id).execute()
+    try:
+      local_execute(
+          """INSERT INTO admissions (
+              id, patient_id, hospital_id, bed_id, ward_id, status, diagnosis, reason, recommended_by, room_type, admission_qr, admitted_at, admitted_by
+          ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)""",
+          (
+              admission_id, patient_id, p_hospital_id, bed_id, ward_id, diagnosis, admission_reason,
+              recommended_by, room_type, admission_qr, datetime.utcnow().isoformat(),
+              admitted_by or (authz.current_session.get() or {}).get("name") or ""
+          )
+      )
+    except Exception:
+        # Could not record the admission: give the bed back instead of leaving it occupied.
+        supabase.table("beds").update({"status": "empty", "patient_id": None, "admitted_at": None}).eq("id", bed_id).execute()
+        raise
+
+    # STEP 4 — (bed was already claimed above). Close any Atlas request for this patient.
+    local_execute("UPDATE admission_recommendations SET status='admitted' WHERE patient_id=? AND status='pending'", (patient_id,))
     
     # STEP 5 — Update patient
     supabase.table("patients").update({
@@ -7820,7 +8063,7 @@ def calculate_admission_cost(admission_id: str):
     delta = now - admitted_at
     total_days = max(1, delta.days + (1 if delta.seconds > 0 else 0))
     
-    room_cost = total_days * adm.get("room_cost_per_day", 500)
+    room_cost = total_days * room_cost_per_day(adm.get("room_type"))
     
     # Tests performed during this stay and charged to it (see admission_test_charges).
     test_costs, test_items = admission_test_charges(adm["patient_id"], adm.get("admitted_at"))
@@ -7861,7 +8104,7 @@ def generate_discharge_summary(req: DischargeSummaryRequest):
         total_days = max(1, delta.days)
 
         # STEP 2 — Calculate costs
-        room_cost = total_days * adm.get("room_cost_per_day", 500)
+        room_cost = total_days * room_cost_per_day(adm.get("room_type"))
         
         test_cost, test_items = admission_test_charges(patient_id, adm.get("admitted_at"))
         total_cost = room_cost + test_cost
@@ -7955,9 +8198,10 @@ async def confirm_discharge(req: DischargeConfirmRequest):
             (datetime.utcnow().isoformat(), req.final_diagnosis, req.admission_id)
         )
 
-        # STEP 3 — Free the bed in Supabase
+        # STEP 3 — Free the bed in Supabase. This used to set "cleaning", but nothing in the app ever
+        # moved a bed from "cleaning" back to "empty", so every discharge permanently removed a bed.
         bed_update = supabase.table("beds").update({
-            "status": "cleaning",
+            "status": "empty",
             "patient_id": None,
             "admitted_at": None
         }).eq("patient_id", req.patient_id).execute()
@@ -8023,7 +8267,7 @@ async def confirm_discharge(req: DischargeConfirmRequest):
         if bed_id:
             await sio.emit("bed_status_changed", {
                 "bed_id": bed_id,
-                "status": "cleaning"
+                "status": "empty"
             })
 
         return {
@@ -8202,6 +8446,10 @@ for _kind, _fn in {
 
 from receptionist import router as receptionist_router
 fastapi_app.include_router(receptionist_router)
+import virtual_consult   # doctors open a patient's reports by VELA ID (see the note at the top of that file)
+fastapi_app.include_router(virtual_consult.router)
+fastapi_app.include_router(gnani_voice.router)   # Gnani speech routes (/api/stt, /api/frontdesk/*)
+fastapi_app.add_event_handler("startup", gnani_voice.on_startup)   # cache the filler clips in the background
 
 # ── NETWORK HOSPITALS ──
 
