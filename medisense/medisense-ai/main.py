@@ -8449,7 +8449,9 @@ fastapi_app.include_router(receptionist_router)
 import virtual_consult   # doctors open a patient's reports by VELA ID (see the note at the top of that file)
 fastapi_app.include_router(virtual_consult.router)
 fastapi_app.include_router(gnani_voice.router)   # Gnani speech routes (/api/stt, /api/frontdesk/*)
-fastapi_app.add_event_handler("startup", gnani_voice.on_startup)   # cache the filler clips in the background
+@fastapi_app.on_event("startup")       # same hook style the rest of this file uses (add_event_handler is gone in Starlette 1.x)
+async def _cache_gnani_clips():
+    await gnani_voice.on_startup()      # builds the cached filler clips in the background
 
 # ── NETWORK HOSPITALS ──
 
