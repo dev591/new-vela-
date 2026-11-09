@@ -2,7 +2,7 @@ import { API_URL, POLL_INTERVALS } from "../utils/config";
 import { useEffect, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { getUser, logout } from '../utils/auth'
-import { LayoutGrid, Users, AlertTriangle, UserPlus, FileText, LogOut, ChevronLeft, ChevronRight } from 'lucide-react'
+import { LayoutGrid, Users, AlertTriangle, UserPlus, FileText, LogOut, ChevronLeft, ChevronRight, Video } from 'lucide-react'
 
 type NavItem = { 
   label: string; 
@@ -55,6 +55,7 @@ export default function DoctorSidebar({ onExpandChange }: { onExpandChange: (exp
     { label: 'Patients', path: '/patients', icon: Users },
     { label: 'Emergency', path: '/emergency', icon: AlertTriangle, hasBadge: true, count: emergencyCount },
     { label: 'Add Patient', path: '/patients/add', icon: UserPlus },
+    { label: 'Virtual Consult', path: '/virtual-consult', icon: Video },
     { label: 'Handover', path: '/handover', icon: FileText }
   ]
 

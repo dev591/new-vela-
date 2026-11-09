@@ -48,3 +48,8 @@ github.copilot*.vsix
 # Vercel CLI project link (per machine) and the local product-film workspace
 .vercel
 motion/
+
+# Environment files and keys (the .env.example templates stay tracked)
+.env.*
+!.env.example
+*.pem

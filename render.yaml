@@ -40,6 +40,12 @@ services:
         sync: false
       - key: api_key
         sync: false
+      - key: GNANI_API_KEY
+        sync: false
+      - key: KIOSK_HOSPITAL_ID
+        sync: false
+      - key: KIOSK_DEMO_VELA_ID
+        sync: false
       - key: ELEVENLABS_API_KEY
         sync: false
       - key: ELEVENLABS_VOICE_ID

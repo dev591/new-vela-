@@ -7,6 +7,8 @@ import { socket, type SocketEventPayload } from '../hooks/useSocket'
 import PatientHistoryRag from '../components/PatientHistoryRag'
 import ImagingAnalysis from '../components/ImagingAnalysis'
 import toast from 'react-hot-toast'
+import { VoiceRecorder, canRecord } from '../utils/voiceRecorder'
+import { transcribe } from '../utils/speech'
 import { ResponsiveContainer, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip as ChartTooltip } from 'recharts'
 import { TrendingUp, Trash2, ChevronDown, ChevronUp } from 'lucide-react'
 
@@ -269,8 +271,39 @@ export default function PatientDetail() {
   // --- AMBIENT VOICE-TO-ORDER LOGIC ---
   const transcriptRef = useRef("")
 
+  // Gnani path for the ambient scribe: the recorder cuts the conversation into utterances at
+  // pauses (continuous mode), each one is transcribed by Prisma, and the text is appended in order.
+  const ambientChain = useRef<Promise<void>>(Promise.resolve())
+  const startAmbientGnani = async () => {
+    let text = ""
+    const rec = new VoiceRecorder({
+      continuous: true,
+      silenceMs: 1500,
+      maxMs: 25000,                       // Prisma accepts at most 30 s per clip
+      onError: (m) => { toast.error(m); setIsAmbientListening(false) },
+      onChunk: (wav) => {
+        // Chain the requests so pieces of the conversation stay in order.
+        ambientChain.current = ambientChain.current.then(async () => {
+          try {
+            const r = await transcribe(wav)
+            if (r.transcript) { text += r.transcript + " "; transcriptRef.current = text; setAmbientTranscript(text) }
+          } catch (e) { toast.error((e as Error).message) }
+        })
+      },
+      onEnd: () => setIsAmbientListening(false),
+    })
+    recognitionRef.current = { stop: () => rec.stop(), abort: () => rec.cancel(), recorder: rec }
+    await rec.start()
+    if (!rec.active) return
+    setIsAmbientListening(true)
+    setAmbientTranscript("")
+    transcriptRef.current = ""
+    toast.success("🎙️ Ambient Scribe is listening...", { icon: "🎙️", duration: 3000 })
+  }
+
   const startAmbientListening = () => {
     if (isAmbientListening) return
+    if (canRecord()) { void startAmbientGnani(); return }   // old Web Speech code below = fallback
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SpeechRecognition) {
       toast.error("Chrome Speech Recognition is required for voice capture.")
@@ -326,7 +359,8 @@ export default function PatientDetail() {
       }
     }
     setIsAmbientListening(false)
-    
+    await ambientChain.current          // wait for the last utterance to finish transcribing
+
     const textToSend = transcriptRef.current.trim()
     if (!textToSend) {
       toast.error("No consultation dialogue captured.")

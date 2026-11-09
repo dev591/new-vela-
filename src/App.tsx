@@ -10,6 +10,8 @@ import ErrorBoundary from "./components/ErrorBoundary";
 // Route-level code splitting keeps the initial bundle small — heavy deps
 // (mapbox-gl, three, recharts) only load with the page that needs them.
 const Login = lazy(() => import("./pages/Login"));
+const FrontDesk = lazy(() => import("./pages/FrontDesk"));
+const VirtualConsult = lazy(() => import("./pages/VirtualConsult"));
 const Receptionist = lazy(() => import("./pages/Receptionist"));
 const Doctor = lazy(() => import("./pages/Doctor"));
 const PatientDetail = lazy(() => import("./pages/PatientDetail"));
@@ -36,7 +38,7 @@ function RouteFallback() {
 
 function AtlasWrapper({ currentPatientId }: { currentPatientId?: string }) {
   const location = useLocation();
-  const hiddenPaths = ['/', '/login', '/portal', '/patient-dashboard', '/ward-scan'];
+  const hiddenPaths = ['/', '/login', '/portal', '/frontdesk', '/patient-dashboard', '/ward-scan'];
   
   // Also hide on dynamic scan routes
   if (hiddenPaths.includes(location.pathname)) return null;
@@ -201,8 +203,11 @@ function App() {
         <Route path="/patients/add" element={<ProtectedRoute roles={['doctor']}><AddPatient /></ProtectedRoute>} />
         <Route path="/patients/:id" element={<ProtectedRoute roles={['doctor']}><PatientDetail /></ProtectedRoute>} />
         <Route path="/emergency" element={<ProtectedRoute roles={['doctor']}><Emergency /></ProtectedRoute>} />
+        <Route path="/virtual-consult" element={<ProtectedRoute roles={['doctor']}><VirtualConsult /></ProtectedRoute>} />
         <Route path="/handover" element={<ProtectedRoute roles={['doctor']}><Handover /></ProtectedRoute>} />
         <Route path="/portal" element={<PatientPortal />} />
+        {/* Public voice kiosk: no sign-in, speaks Hindi / Hinglish / English. */}
+        <Route path="/frontdesk" element={<FrontDesk />} />
         <Route path="/patient-dashboard" element={<ProtectedRoute roles={['patient']}><PatientDashboard /></ProtectedRoute>} />
         <Route path="/scan/:velaId" element={<QRScan />} />
         <Route path="/hospital-manager" element={<ProtectedRoute roles={['hospital_manager', 'manager']}><HospitalManager /></ProtectedRoute>} />
