@@ -113,12 +113,14 @@ CREATE INDEX IF NOT EXISTS idx_network_doctor_appointments_doctor ON network_doc
 -- The backend reads these with the anon key, exactly like patients/tickets/etc.
 -- SUPERSEDED: rls_lockdown.sql re-enables RLS on every table. Don't re-run the
 -- DISABLE lines below on a database that has had rls_lockdown.sql applied.
-ALTER TABLE notifications               DISABLE ROW LEVEL SECURITY;
-ALTER TABLE admissions                  DISABLE ROW LEVEL SECURITY;
-ALTER TABLE reassess_requests           DISABLE ROW LEVEL SECURITY;
-ALTER TABLE network_labs                DISABLE ROW LEVEL SECURITY;
-ALTER TABLE network_doctors             DISABLE ROW LEVEL SECURITY;
-ALTER TABLE network_doctor_appointments DISABLE ROW LEVEL SECURITY;
+-- RLS stays ON (it used to be switched off here). The backend uses the service-role key, which bypasses RLS,
+-- and the browser's anon key has no policies, so it can read nothing. See rls_lockdown.sql.
+ALTER TABLE notifications               ENABLE ROW LEVEL SECURITY;
+ALTER TABLE admissions                  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE reassess_requests           ENABLE ROW LEVEL SECURITY;
+ALTER TABLE network_labs                ENABLE ROW LEVEL SECURITY;
+ALTER TABLE network_doctors             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE network_doctor_appointments ENABLE ROW LEVEL SECURITY;
 
 -- 7) Make the API see the new tables/columns immediately ──────────────────────
 NOTIFY pgrst, 'reload schema';

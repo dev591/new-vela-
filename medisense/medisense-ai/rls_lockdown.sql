@@ -6,7 +6,7 @@
 -- browsers (needed only for Supabase Auth sign-up / password reset) can no
 -- longer read or write any table.
 --
--- This supersedes the "DISABLE ROW LEVEL SECURITY" lines in supabase_fixes.sql.
+-- This replaces the lines in supabase_fixes.sql that used to turn RLS off.
 
 -- 1. See what is open today (run this first and keep the output).
 SELECT schemaname, tablename, rowsecurity

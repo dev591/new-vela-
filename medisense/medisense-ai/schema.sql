@@ -410,3 +410,29 @@ alter default privileges in schema public revoke all on sequences from anon, aut
 alter default privileges in schema public revoke all on functions from anon, authenticated;
 
 notify pgrst, 'reload schema';
+
+-- Row Level Security, one explicit line per table (the loop above does the same for any table added later).
+-- No policies are created on purpose: only the backend's service-role key can read or write.
+alter table if exists public.admissions enable row level security;
+alter table if exists public.appointments enable row level security;
+alter table if exists public.beds enable row level security;
+alter table if exists public.blood_tests enable row level security;
+alter table if exists public.doctors enable row level security;
+alter table if exists public.documents enable row level security;
+alter table if exists public.medications enable row level security;
+alter table if exists public.network_appointments enable row level security;
+alter table if exists public.network_doctor_appointments enable row level security;
+alter table if exists public.network_doctors enable row level security;
+alter table if exists public.network_hospitals enable row level security;
+alter table if exists public.network_labs enable row level security;
+alter table if exists public.notes enable row level security;
+alter table if exists public.notifications enable row level security;
+alter table if exists public.patients enable row level security;
+alter table if exists public.reassess_requests enable row level security;
+alter table if exists public.reminders enable row level security;
+alter table if exists public.tickets enable row level security;
+alter table if exists public.vela_hospitals enable row level security;
+alter table if exists public.vela_staff enable row level security;
+alter table if exists public.vela_walkthrough enable row level security;
+alter table if exists public.voice_queries enable row level security;
+alter table if exists public.wards enable row level security;

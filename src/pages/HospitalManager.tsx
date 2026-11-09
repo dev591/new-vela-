@@ -160,23 +160,7 @@ export default function HospitalManager() {
     e.preventDefault();
     setLoginLoading(true);
 
-    // DEMO BYPASS
-    if (loginEmail === "admin@vela.health" && loginPassword === "demo123") {
-      localStorage.setItem('vela_manager_auth', 'true');
-      localStorage.setItem('vela_manager_email', loginEmail);
-      localStorage.setItem('vela_hospital_id', 'VLA-DEMO');
-      localStorage.setItem('vela_hospital_name', 'Vela Demo Hospital');
-      localStorage.setItem('vela_manager_name', 'Demo Administrator');
-      localStorage.setItem('vela_manager_role', 'Systems Lead');
-      setIsAuthed(true);
-      setHospitalId('VLA-DEMO');
-      setHospitalName('Vela Demo Hospital');
-      setManagerName('Demo Administrator');
-      setManagerRole('Systems Lead');
-      setLoginLoading(false);
-      toast.success('Entering Demo Environment');
-      return;
-    }
+    // (A hard-coded browser-side "demo login" used to be here. It is gone: managers sign in through the server only.)
 
     try {
       const res = await fetch(`${API_URL}/api/manager/login`, {

@@ -459,6 +459,13 @@ conversation_history = defaultdict(lambda: {
     "current_patient_name": None
 })
 
+def pg_safe(value) -> str:
+    """Make user text safe to put inside a PostgREST .or_() filter string. A comma or parenthesis would let the
+    caller add filter conditions of their own, so those (and quotes, wildcards, backslashes) become spaces."""
+    import re as _re_pg
+    return _re_pg.sub(r"[,()\\\"'*]", " ", str(value or "")).strip()
+
+
 # ── FOLLOW-UP MEMORY ──
 # When Atlas asks "Shall I notify the receptionist?" the next thing the doctor says is "okay". That
 # only makes sense if Atlas remembers it asked. The question is kept per session, for a few minutes.
@@ -5137,7 +5144,7 @@ async def _search_hospitals_global_impl(query: Optional[str] = None, lat: Option
                 print(f"⚠️ Warning: Nearby sorting failed: {e}")
                 
         # 3. Direct keyword query fallback
-        q_str = query or ""
+        q_str = pg_safe(query)
         result = supabase_admin.table("vela_hospitals") \
             .select("*") \
             .or_(f"name.ilike.%{q_str}%,city.ilike.%{q_str}%,state.ilike.%{q_str}%,address.ilike.%{q_str}%") \
@@ -5560,7 +5567,7 @@ async def get_notifications(role: str):
             q = supabase.table("notifications").select("*").eq("role", role)
             if hospital_id:
                 # This hospital's notifications plus network-wide ones (no hospital).
-                q = q.or_(f"hospital_id.eq.{hospital_id},hospital_id.is.null")
+                q = q.or_(f"hospital_id.eq.{pg_safe(hospital_id)},hospital_id.is.null")
             return q.order("created_at", desc=True).limit(20).execute()
         result = await asyncio.to_thread(_query)
 
@@ -7931,7 +7938,7 @@ async def confirm_admission(data: dict):
     
     # STEP 1 — Generate admission QR
     identifier = f"VELA-ADM-{patient_id}-{bed_id}-{datetime.utcnow().timestamp()}"
-    qr_hash = hashlib.md5(identifier.encode()).hexdigest()[:12].upper()
+    qr_hash = secrets.token_hex(6).upper()   # random, not derived from the ids (md5 was guessable and flagged as weak)
     admission_qr = f"ADM-{qr_hash}"
     
     # STEP 2 — Get room cost
