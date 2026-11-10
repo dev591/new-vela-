@@ -8,3 +8,4 @@ dist/
 *.mp3
 *.vsix
 *.local.md
+!public/samples/*.pdf

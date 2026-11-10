@@ -53,3 +53,4 @@ motion/
 .env.*
 !.env.example
 *.pem
+.taste-skill/

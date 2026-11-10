@@ -6,6 +6,7 @@ import ProtectedRoute from "./components/ProtectedRoute";
 import Atlas from "./components/Atlas/Atlas";
 import useSocket from "./hooks/useSocket";
 import ErrorBoundary from "./components/ErrorBoundary";
+import DemoJourney from "./components/DemoJourney";
 
 // Route-level code splitting keeps the initial bundle small — heavy deps
 // (mapbox-gl, three, recharts) only load with the page that needs them.
@@ -27,6 +28,7 @@ const LabController = lazy(() => import("./pages/LabController"));
 const WardScan = lazy(() => import("./pages/WardScan"));
 const VelaOwner = lazy(() => import("./pages/VelaOwner"));
 const ManagerWalkthrough = lazy(() => import("./pages/ManagerWalkthrough"));
+const DataSources = lazy(() => import("./pages/DataSources"));
 
 function RouteFallback() {
   return (
@@ -191,6 +193,7 @@ function App() {
       />
       
       <AtlasWrapper currentPatientId={currentPatientId} />
+      <DemoJourney />
 
       <ErrorBoundary>
       <Suspense fallback={<RouteFallback />}>
@@ -206,6 +209,8 @@ function App() {
         <Route path="/virtual-consult" element={<ProtectedRoute roles={['doctor']}><VirtualConsult /></ProtectedRoute>} />
         <Route path="/handover" element={<ProtectedRoute roles={['doctor']}><Handover /></ProtectedRoute>} />
         <Route path="/portal" element={<PatientPortal />} />
+        {/* Public: where the demo data comes from, with the sample files to download. */}
+        <Route path="/data-sources" element={<DataSources />} />
         {/* Public voice kiosk: no sign-in, speaks Hindi / Hinglish / English. */}
         <Route path="/frontdesk" element={<FrontDesk />} />
         <Route path="/patient-dashboard" element={<ProtectedRoute roles={['patient']}><PatientDashboard /></ProtectedRoute>} />

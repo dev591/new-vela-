@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { AnimatePresence, animate, motion } from 'framer-motion'
 import {
   ArrowRight, ArrowLeft, Check, Eye, EyeOff, FlaskConical, HeartPulse, LayoutDashboard,
@@ -10,6 +10,7 @@ import CinematicCursor from '../components/cinematic/CinematicCursor'
 import { networkReceptionistLogin, networkLabLogin, networkDoctorLogin } from '../utils/auth'
 import { API_URL } from '../utils/config'
 import { resetSocket } from '../hooks/useSocket'
+import { DEMO_ACCOUNTS, DEMO_MODE, DEMO_STEPS, type DemoRole } from '../utils/demo'
 
 type Role = 'doctor' | 'receptionist' | 'hospital_manager' | 'lab_controller'
 
@@ -79,7 +80,7 @@ const ROLE_ICONS: Record<Role, LucideIcon> = {
 }
 
 export default function Login() {
-  const [step, setStep] = useState<'select' | 'form'>('select')
+  const [step, setStep] = useState<'select' | 'form' | 'patient'>('select')
   const [role, setRole] = useState<Role>('doctor')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -226,38 +227,59 @@ export default function Login() {
   }
 
   /**
-   * Patient demo entry. Uses /api/demo/login-patient, which seeds Rajesh Kumar
-   * if missing and returns a real session token. The previous implementation
-   * called /api/patient/by-email directly, which the auth middleware rejects
-   * with a 401 because no session exists yet at that point.
+   * Patient sign-in with an email and password (the demo patient, Rajesh Kumar, or any real account).
+   * New patients create an account on /portal. The session it stores is the same one the portal uses.
    */
-  const enterAsPatient = async () => {
-    setPatientLoading(true)
+  const handlePatientLogin = async (e: React.FormEvent) => {
+    e.preventDefault()
     setError('')
-    // The demo patient is a fixed seed account: never fall through to "create account".
-    // Retry a couple of times (cold database / first request), then show a clear message.
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        const res = await fetch(`${API_URL}/api/demo/login-patient`, { method: 'POST', signal: AbortSignal.timeout(15000) })
-        const data = await res.json()
-        if (data?.status === 'success' && data.patient) {
-          localStorage.setItem('vela_token', data.token || '')
-          localStorage.setItem('vela_auth', 'true')
-          localStorage.setItem('vela_role', 'patient')
-          localStorage.setItem('vela_vela_id', data.vela_id || '')
-          localStorage.setItem('vela_patient', JSON.stringify(data.patient))
-          localStorage.setItem('vela_email', data.patient.email || '')
-          setPatientLoading(false)
-          navigate('/patient-dashboard')
-          return
-        }
-      } catch {
-        /* retry below */
+    if (!email.trim() || !password) return setError('Enter your email and password.')
+    setPatientLoading(true)
+    resetSocket()
+    try {
+      const res = await fetch(`${API_URL}/api/patient/login`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password }), signal: AbortSignal.timeout(20000),
+      })
+      const data = await res.json()
+      if (data?.status === 'success' && data.patient) {
+        localStorage.setItem('vela_token', data.token || '')
+        localStorage.setItem('vela_auth', 'true')
+        localStorage.setItem('vela_role', 'patient')
+        localStorage.setItem('vela_vela_id', data.vela_id || '')
+        localStorage.setItem('vela_patient', JSON.stringify(data.patient))
+        localStorage.setItem('vela_email', data.patient.email || '')
+        navigate('/patient-dashboard')
+        return
       }
-      await new Promise(r => setTimeout(r, 600 * (attempt + 1)))
+      setError(data?.message || "That email and password don't match.")
+    } catch (err) {
+      const slow = (err as Error)?.name === 'TimeoutError' || (err as Error)?.name === 'AbortError'
+      setError(slow ? 'The server took too long to respond. Please try again.' : 'Backend not reachable. Is the server running?')
     }
-    setError("Couldn't open the demo patient. Please check the server is running and tap again.")
     setPatientLoading(false)
+  }
+
+  /** Jump straight to a step's sign-in form with its demo credentials filled in. */
+  const startAs = (r: DemoRole) => {
+    setError('')
+    setEmail(DEMO_ACCOUNTS[r].email)
+    setPassword(DEMO_ACCOUNTS[r].password)
+    if (r === 'patient') { setStep('patient'); return }
+    setRole(r); setStep('form')
+  }
+
+  // /login?as=receptionist (from the demo guide's "Sign out, go to ..." button) opens that sign-in ready to submit.
+  const [params] = useSearchParams()
+  const asRole = params.get('as')
+  useEffect(() => {
+    if (asRole === 'patient' || asRole === 'receptionist' || asRole === 'doctor') startAs(asRole)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [asRole])
+
+  const openPatient = () => {
+    if (DEMO_MODE) { startAs('patient'); return }
+    setEmail(''); setPassword(''); setError(''); setStep('patient')
   }
 
   const copyValue = (value: string, type: 'email' | 'password') => {
@@ -268,7 +290,9 @@ export default function Login() {
 
   const selected = roleDetails[role]
   const previewRole: Role = hoverRole ?? role
-  const preview = roleDetails[previewRole]
+  // The left panel previews a workspace; the patient sign-in is not one of the four staff roles.
+  const patientPreview = { n: '05', label: 'Patient', description: 'Your records, visits and medicines in one place', features: ['Book a visit', 'Test results', 'My medicines', 'Ask Atlas'] }
+  const preview = step === 'patient' ? patientPreview : roleDetails[previewRole]
   const ease = [0.32, 0.72, 0, 1] as const
 
   const fillDemo = () => {
@@ -299,7 +323,7 @@ export default function Login() {
 
         <div className="relative z-10 text-center">
           <AnimatePresence mode="wait">
-            <motion.div key={step === 'select' && !hoverRole ? 'welcome' : previewRole}
+            <motion.div key={step === 'select' && !hoverRole ? 'welcome' : step === 'patient' ? 'patient' : previewRole}
               initial={{ opacity: 0, y: 18, filter: 'blur(10px)' }}
               animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
               exit={{ opacity: 0, y: -18, filter: 'blur(10px)' }}
@@ -346,6 +370,39 @@ export default function Login() {
               <h1 className="text-[clamp(2.2rem,3.6vw,3.2rem)] font-semibold tracking-[-0.045em] leading-[1.02] mb-3">Choose your workspace.</h1>
               <p className="text-[16px] text-[#515154] mb-9">Every role sees the same patient record, scoped to what that role needs.</p>
 
+              {DEMO_MODE && (
+                <section aria-label="Demo path" className="mb-7 rounded-2xl bg-[#1D1D1F] text-white p-5">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[13px] font-semibold text-[#2997FF]">Judges: follow this path</span>
+                    <span className="text-[12px] text-white/50">about 2 minutes</span>
+                  </div>
+                  <p className="text-[14px] text-white/70 mb-4">Three sign-ins, in order. Every account is synthetic demo data. “Sign in” fills the login for you.</p>
+                  <ol className="space-y-3">
+                    {DEMO_STEPS.map(st => {
+                      const acc = DEMO_ACCOUNTS[st.role]
+                      return (
+                        <li key={st.role} className="rounded-xl bg-white/[0.06] p-3.5">
+                          <div className="flex items-center gap-3">
+                            <span className="grid place-items-center w-7 h-7 rounded-full bg-[#0071E3] text-[13px] font-semibold shrink-0">{st.n}</span>
+                            <span className="flex-1 min-w-0">
+                              <span className="block text-[15px] font-semibold">{st.who} <span className="font-normal text-white/60">· {st.name}</span></span>
+                              <span className="block text-[13px] text-white/65 leading-snug">{st.n === 1 ? 'Book a visit at VELA Care.' : st.n === 2 ? 'Accept that appointment.' : 'See the patient and ask Atlas.'}</span>
+                            </span>
+                            <button type="button" onClick={() => startAs(st.role)}
+                              className="shrink-0 h-9 px-4 rounded-full bg-[#0071E3] hover:bg-[#0058B0] text-[13px] font-semibold">Sign in</button>
+                          </div>
+                          <div className="mt-2.5 grid gap-1 text-[12px] text-white/70 select-all">
+                            <span className="truncate">Email: <span className="text-white">{acc.email}</span></span>
+                            <span>Password: <span className="text-white">{acc.password || 'ask the team (not set on this build)'}</span></span>
+                          </div>
+                        </li>
+                      )
+                    })}
+                  </ol>
+                  <p className="mt-4 text-[13px] text-white/60">Also: the <a href="/frontdesk" className="underline text-white/85">voice front desk</a> needs no sign-in. Wondering where the data comes from? <a href="/data-sources" className="underline text-white/85">Download the sample files</a>.</p>
+                </section>
+              )}
+
               <div className="flex flex-col gap-2.5" onMouseLeave={() => setHoverRole(null)}>
                 {(Object.keys(roleDetails) as Role[]).map((r, i) => {
                   const Icon = ROLE_ICONS[r]
@@ -357,7 +414,7 @@ export default function Login() {
                       className="group w-full text-left flex items-center gap-4 rounded-2xl bg-white px-5 py-4 border border-black/[0.06] shadow-[0_1px_2px_rgba(0,0,0,0.04)] hover:shadow-[0_18px_40px_-18px_rgba(0,0,0,0.25)] hover:-translate-y-0.5">
                       <span className="w-11 h-11 rounded-xl grid place-items-center bg-[#E8F2FD] text-[#0071E3] group-hover:bg-[#0071E3] group-hover:text-white transition-colors"><Icon size={20} /></span>
                       <span className="flex-1 min-w-0">
-                        <span className="block text-[17px] font-semibold tracking-[-0.02em]">{roleDetails[r].label}</span>
+                        <span className="block text-[17px] font-semibold tracking-[-0.02em]">{roleDetails[r].label}{DEMO_MODE && (r === 'receptionist' || r === 'doctor') && <span className="ml-2 text-[12px] font-semibold text-[#0071E3]">Step {r === 'receptionist' ? 2 : 3}</span>}</span>
                         <span className="block text-[14px] text-[#6E6E73] truncate">{roleDetails[r].description}</span>
                       </span>
                       <ArrowRight size={18} className="text-[#6E6E73] transition-transform group-hover:translate-x-1 group-hover:text-[#0071E3]" />
@@ -365,19 +422,71 @@ export default function Login() {
                   )
                 })}
 
-                <motion.button type="button" onClick={enterAsPatient} disabled={patientLoading}
+                <motion.button type="button" onClick={openPatient}
                   initial={{ opacity: 0, y: 16 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.36, duration: 0.45, ease }}
                   className="group mt-3 w-full text-left flex items-center gap-4 rounded-2xl bg-[#1D1D1F] text-white px-5 py-4 disabled:opacity-60">
                   <span className="w-11 h-11 rounded-xl grid place-items-center bg-white/10 text-[#2997FF]"><HeartPulse size={20} /></span>
                   <span className="flex-1 min-w-0">
-                    <span className="block text-[17px] font-semibold tracking-[-0.02em]">Patient <span className="ml-2 text-[12px] font-semibold text-[#2997FF]">Demo</span></span>
-                    <span className="block text-[14px] text-white/60 truncate">{patientLoading ? 'Opening your record…' : 'Personal health record — enter as Rajesh Kumar'}</span>
+                    <span className="block text-[17px] font-semibold tracking-[-0.02em]">Patient{DEMO_MODE && <span className="ml-2 text-[12px] font-semibold text-[#2997FF]">Step 1</span>}</span>
+                    <span className="block text-[14px] text-white/60 truncate">Book visits, see records. Demo patient: Rajesh Kumar</span>
                   </span>
-                  {patientLoading ? <Loader2 size={18} className="animate-spin" /> : <ArrowRight size={18} className="text-white/60 transition-transform group-hover:translate-x-1" />}
+                  <ArrowRight size={18} className="text-white/60 transition-transform group-hover:translate-x-1" />
                 </motion.button>
               </div>
 
               {error && <p className="mt-5 text-[14px] text-[#D70015]">{error}</p>}
+            </motion.div>
+          ) : step === 'patient' ? (
+            <motion.div key="patient" className="w-full max-w-[440px]"
+              initial={{ opacity: 0, x: 40 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -40 }} transition={{ duration: 0.5, ease }}>
+              <button type="button" onClick={() => { setStep('select'); setError(''); setEmail(''); setPassword('') }}
+                className="inline-flex items-center gap-2 h-10 -ml-3 px-3 rounded-full text-[14px] text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/5 mb-8">
+                <ArrowLeft size={16} /> All workspaces
+              </button>
+              <h1 className="text-[clamp(2.2rem,3.6vw,3rem)] font-semibold tracking-[-0.045em] leading-none mb-3">Patient sign-in</h1>
+              <p className="text-[16px] text-[#515154] mb-5">See your records and book a visit.</p>
+              {DEMO_MODE && (
+                <div className="mb-6 rounded-xl bg-[#E8F2FD] text-[#004C99] text-[14px] px-4 py-3 leading-snug">
+                  <strong>Step 1 of 3.</strong> After signing in, open <strong>Book a visit</strong> and book Dr. Arjun Rao at VELA Care.
+                </div>
+              )}
+              <form onSubmit={handlePatientLogin} className="flex flex-col gap-4">
+                <label className="block rounded-2xl bg-white border border-black/[0.08] px-4 pt-3 pb-2.5 focus-within:border-[#0071E3] focus-within:ring-4 focus-within:ring-[#0071E3]/15 transition">
+                  <span className="block text-[12px] font-semibold text-[#6E6E73]">Email</span>
+                  <input value={email} onChange={e => setEmail(e.target.value)} type="email" autoComplete="username"
+                    placeholder="you@example.com" className="w-full bg-transparent outline-none text-[16px] py-1" />
+                </label>
+                <label className="block rounded-2xl bg-white border border-black/[0.08] px-4 pt-3 pb-2.5 focus-within:border-[#0071E3] focus-within:ring-4 focus-within:ring-[#0071E3]/15 transition">
+                  <span className="block text-[12px] font-semibold text-[#6E6E73]">Password</span>
+                  <span className="flex items-center gap-2">
+                    <input value={password} onChange={e => setPassword(e.target.value)} type={showPassword ? 'text' : 'password'} autoComplete="current-password"
+                      placeholder="••••••••" className="flex-1 min-w-0 bg-transparent outline-none text-[16px] py-1" />
+                    <button type="button" onClick={() => setShowPassword(v => !v)} aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      className="p-1.5 rounded-lg text-[#6E6E73] hover:text-[#1D1D1F] hover:bg-black/5">
+                      {showPassword ? <EyeOff size={17} /> : <Eye size={17} />}
+                    </button>
+                  </span>
+                </label>
+                {error && <div className="rounded-xl bg-[#FFEBEE] text-[#D70015] text-[14px] px-4 py-3">{error}</div>}
+                <button type="submit" disabled={patientLoading}
+                  className="mt-3 h-14 rounded-full bg-[#0071E3] hover:bg-[#0058B0] text-white text-[17px] font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-70">
+                  {patientLoading ? <><Loader2 size={18} className="animate-spin" /> Signing in…</> : <>Sign in <ArrowRight size={18} /></>}
+                </button>
+              </form>
+              {DEMO_MODE && (
+                <div className="mt-8 rounded-2xl bg-white border border-black/[0.06] p-5">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[14px] font-semibold">Demo patient: Rajesh Kumar</span>
+                    <button type="button" onClick={() => startAs('patient')} className="text-[14px] font-semibold text-[#0071E3] hover:underline">Fill for me</button>
+                  </div>
+                  <div className="text-[13px] text-[#515154] select-all py-1.5 border-t border-black/5">Email: {DEMO_ACCOUNTS.patient.email}</div>
+                  <div className="text-[13px] text-[#515154] select-all py-1.5 border-t border-black/5">Password: {DEMO_ACCOUNTS.patient.password || 'ask the team (not set on this build)'}</div>
+                </div>
+              )}
+              <div className="mt-6 flex items-center gap-2 text-[14px] text-[#515154]">
+                <HeartPulse size={16} className="text-[#0071E3]" /> New here?
+                <button type="button" onClick={() => navigate('/portal')} className="font-semibold text-[#0071E3] hover:underline">Create a free account</button>
+              </div>
             </motion.div>
           ) : (
             <motion.div key="form" className="w-full max-w-[440px]"
@@ -391,6 +500,13 @@ export default function Login() {
               <p className="text-[16px] text-[#515154] mb-9">
                 {role === 'hospital_manager' ? 'Enter the credentials provided by Vela.' : `Access the ${selected.label.toLowerCase()} workspace.`}
               </p>
+              {DEMO_MODE && (role === 'receptionist' || role === 'doctor') && (
+                <div className="-mt-5 mb-6 rounded-xl bg-[#E8F2FD] text-[#004C99] text-[14px] px-4 py-3 leading-snug">
+                  {role === 'receptionist'
+                    ? <><strong>Step 2 of 3.</strong> After signing in, open <strong>Appointments</strong> and accept Rajesh Kumar’s request.</>
+                    : <><strong>Step 3 of 3.</strong> After signing in, Rajesh Kumar is in your queue. Open him and press Space to talk to Atlas.</>}
+                </div>
+              )}
 
               <form onSubmit={handleLogin} className="flex flex-col gap-4">
                 <label className="block rounded-2xl bg-white border border-black/[0.08] px-4 pt-3 pb-2.5 focus-within:border-[#0071E3] focus-within:ring-4 focus-within:ring-[#0071E3]/15 transition">

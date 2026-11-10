@@ -312,12 +312,13 @@ def reply_language(text: str) -> str:
 # ── 3. Canned lines. The filler is generated once and cached; the others are the safe fallback. ──
 
 # Fillers are ~2 s long on purpose: they cover the time GPT and Timbre need for the real reply.
-FILLERS = {"hi-IN": "हाँ जी, मैं देखता हूँ, एक पल रुकिए।",
-           "hi-en": "Haan ji, main dekhta hoon, ek second rukiye.",
+# The Hindi lines use the feminine verb form (देखती, रही) because all three Timbre voices are female.
+FILLERS = {"hi-IN": "हाँ जी, मैं देखती हूँ, एक पल रुकिए।",
+           "hi-en": "Haan ji, main dekhti hoon, ek second rukiye.",
            "en-IN": "Sure, let me check that for you, one moment."}
 ACK = {   # (routine, emergency) - route to staff, never advice
-    "hi-IN": ("मैं आपकी बात रिसेप्शन स्टाफ तक पहुँचा रहा हूँ।", "मैं अभी स्टाफ को बुला रहा हूँ, कृपया वहीं रुकिए।"),
-    "hi-en": ("Main aapki baat reception staff tak pahuncha raha hoon.", "Main abhi staff ko bula raha hoon, kripya wahin rukiye."),
+    "hi-IN": ("मैं आपकी बात रिसेप्शन स्टाफ तक पहुँचा रही हूँ।", "मैं अभी स्टाफ को बुला रही हूँ, कृपया वहीं रुकिए।"),
+    "hi-en": ("Main aapki baat reception staff tak pahuncha rahi hoon.", "Main abhi staff ko bula rahi hoon, kripya wahin rukiye."),
     "en-IN": ("I'm passing this on to our reception staff.", "I'm calling our staff right now, please stay where you are."),
 }
 TOKEN = {  # (routine, emergency); {n} is the token number
@@ -405,7 +406,7 @@ async def extract(transcript: str) -> dict:
 
 _LANG_RULE = {
     "hi-IN": "Reply in simple Hindi, in Devanagari script.",
-    "hi-en": "Reply in Hinglish: Hindi written in Roman letters, like 'Main aapki madad ke liye staff ko bata raha hoon.'",
+    "hi-en": "Reply in Hinglish: Hindi written in Roman letters, like 'Main aapki madad ke liye staff ko bata rahi hoon.'",
     "en-IN": "Reply in simple English.",
 }
 # The model only writes the acknowledgement. Routing to staff is the whole job; advice is forbidden.

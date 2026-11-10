@@ -92,6 +92,20 @@ intelligible: sent back through Prisma, it is transcribed almost word for word, 
 4. **Ward board.** Receptionist confirms; the bed tile shows the patient; click for details; move or discharge.
 5. **Virtual consultation.** Type VLA-9002; trends and the plain-language reading appear; press Hindi and Timbre explains the results aloud.
 
+## For judges: try it in two minutes
+
+The sign-in screen lists three logins in order (patient, reception, doctor) with a "Sign in" button for each. A guide
+in the corner says what to press and has a "Sign out, go to the next role" button.
+
+1. **Patient** (Rajesh Kumar): Book a visit. Only the demo hospital, VELA Care, is offered. Pick Dr. Arjun Rao and a time.
+2. **Reception** (Meera Shah): Appointments, then Accept Request.
+3. **Doctor** (Dr. Arjun Rao): open Rajesh, press Space and say "Order a CBC test for him". One **Blood CBC** order is
+   created (pathology, Rs 350). Say it again and Atlas says it is already ordered. Say "Admit him, he is critical" for a bed
+   recommendation. The lab then files the result and VELA builds the PDF report.
+
+**Where the data comes from:** `/data-sources` lists every sample file with a download button: the two blood reports the
+patient uploads, and the lab report VELA generates. All of it is synthetic.
+
 ## Challenge checklist
 
 - [x] Uses Gnani's models: Prisma (speech-to-text) and Timbre (text-to-speech)

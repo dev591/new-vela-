@@ -1893,12 +1893,30 @@ def _supabase_password_ok(email: str, password: str) -> bool:
             print(f"⚠️ patient password check failed: {type(e).__name__}: {e}")
         return False
 
+import hmac as _hmac
+DEMO_PATIENT_EMAIL = os.getenv("DEMO_PATIENT_EMAIL", "patient@vela.ai").strip().lower()
+DEMO_PATIENT_PASSWORD = os.getenv("DEMO_PATIENT_PASSWORD", "")
+
 @fastapi_app.post("/api/patient/login")
 async def patient_login(data: dict):
     email = (data.get("email") or "").strip()
     password = data.get("password") or ""
     if "@" not in email or not password:
         return {"status": "error", "message": "Please enter your email and password."}
+    # Optional fixed demo account (Rajesh Kumar) so judges can sign in with credentials written on the
+    # login screen. Off unless DEMO_PATIENT_PASSWORD is set on the server; it opens only the seeded
+    # synthetic patient and uses the same session token as any other patient login.
+    if (DEMO_PATIENT_PASSWORD and email.lower() == DEMO_PATIENT_EMAIL
+            and _hmac.compare_digest(password.encode(), DEMO_PATIENT_PASSWORD.encode())):
+        try:
+            seeded = await asyncio.to_thread(seed_demo_patient)
+        except Exception as e:
+            print(f"⚠️ demo patient seed failed: {type(e).__name__}")
+            seeded = None
+        demo = (seeded or {}).get("patient")
+        if demo:
+            return patient_session_payload(demo)
+        return {"status": "error", "message": "The demo patient is unavailable. Please try again."}
     if not await asyncio.to_thread(_supabase_password_ok, email, password):
         return {"status": "error", "message": "That email and password don't match."}
     try:
@@ -3033,11 +3051,12 @@ async def ambient_consult_approve(req: AmbientConsultApproveRequest):
             notes="Ordered via Ambient Consultation Scribe.",
         )
 
-        if created_orders:
+        fresh_orders = [o for o in created_orders if not o.get("already_ordered")]
+        if fresh_orders:   # an order that already existed has already been announced
             await notify_tests_ordered(
                 patient_id=req.patient_id,
                 patient_name=patient_name,
-                orders=created_orders,
+                orders=fresh_orders,
                 doctor_name=req.prescribed_by,
             )
 
@@ -3226,6 +3245,20 @@ async def voice_query(data: dict):
         return {"status": "success", "intent": "bed_availability", "answer": answer, "patient_id": patient_id}
 
     if is_admit:
+        # Already in a bed? Say so instead of recommending a second admission.
+        current = await _run_in_thread(get_active_admission, patient_id)
+        if current:
+            name = lookup_patient_name(patient_id) or "The patient"
+            where = ""
+            try:
+                bed = supabase.table("beds").select("bed_number").eq("id", current.get("bed_id")).execute().data
+                where = f" in bed {bed[0]['bed_number']}" if bed else ""
+            except Exception:
+                pass
+            answer = f"{name} is already admitted{where}. I haven't recommended a second admission."
+            remember_exchange(session, question, answer)
+            return {"status": "success", "intent": "admission", "answer": answer, "patient_id": patient_id,
+                    "already_admitted": True, "awaiting_confirmation": False}
         # Extract section/ward from query
         section_extraction = openai_client.chat.completions.create(
             model="gpt-4o",
@@ -3385,12 +3418,14 @@ Return only JSON. Nothing else."""
                 "patient_id": patient_id,
             }
 
-        await notify_tests_ordered(
-            patient_id=patient_id,
-            patient_name=patient_name,
-            orders=created_orders,
-            doctor_name=user_role,
-        )
+        fresh_orders = [o for o in created_orders if not o.get("already_ordered")]
+        if fresh_orders:   # an order that already existed has already been announced
+            await notify_tests_ordered(
+                patient_id=patient_id,
+                patient_name=patient_name,
+                orders=fresh_orders,
+                doctor_name=user_role,
+            )
 
         answer = _describe_created_orders(created_orders, patient_name)
         remember_exchange(session, question, answer)
@@ -6160,7 +6195,29 @@ def create_test_orders(
     now = datetime.utcnow().isoformat()
 
     created = []
+    seen: set = set()
     for resolved in resolve_tests_for_hospital(test_names, hospital_id):
+        # One test means one order. Asking for the same test twice in a sentence, or again while the
+        # first order is still open, returns the existing order instead of making a second one.
+        key = resolved["test_type"].strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        open_rows = local_query(
+            "SELECT * FROM test_orders WHERE patient_id = ? AND lower(test_type) = ? "
+            "AND status NOT IN ('cancelled', 'completed') ORDER BY ordered_at DESC LIMIT 1",
+            (patient_id, key))
+        if open_rows:
+            row = open_rows[0]
+            if isinstance(row.get("specific_tests"), str):
+                try:
+                    row["specific_tests"] = json.loads(row["specific_tests"])
+                except Exception:
+                    pass
+            row["catalog_matched"] = True
+            row["already_ordered"] = True
+            created.append(row)
+            continue
         order_id = str(uuid.uuid4())
 
         if admission:
@@ -6209,6 +6266,10 @@ def _describe_created_orders(orders: list, patient_name: str) -> str:
     Names the department and the money, because those are the two things the
     doctor would otherwise have to go and ask someone about.
     """
+    already = [o for o in orders if o.get("already_ordered")]
+    if already and len(already) == len(orders):
+        return (f"{', '.join(o['test_type'] for o in already)} is already ordered for {patient_name} and still open, "
+                f"so I haven't ordered it again.")
     names = ", ".join(o["test_type"] for o in orders)
     by_dept: dict[str, list] = {}
     for o in orders:
@@ -7935,7 +7996,12 @@ async def confirm_admission(data: dict):
     diagnosis = data.get("diagnosis", "")
     recommended_by = data.get("recommended_by", "")
     admitted_by = data.get("admitted_by", "")
-    
+
+    # One active admission per patient: a second confirm (double click, or a stale Atlas request) must not
+    # put the same patient in two beds.
+    if patient_id and get_active_admission(patient_id):
+        return {"status": "error", "message": "This patient is already admitted. Discharge or transfer them first."}
+
     # STEP 1 — Generate admission QR
     identifier = f"VELA-ADM-{patient_id}-{bed_id}-{datetime.utcnow().timestamp()}"
     qr_hash = secrets.token_hex(6).upper()   # random, not derived from the ids (md5 was guessable and flagged as weak)

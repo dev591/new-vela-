@@ -30,6 +30,18 @@ npm run dev
 Before the first real deployment, run `medisense/medisense-ai/rls_lockdown.sql`
 in the Supabase SQL editor (see "Security model").
 
+## Judge demo path
+
+The sign-in screen shows a three-step path with the demo logins and a "Sign in" button for each:
+**Patient** (book a visit at the one demo hospital) → **Reception** (accept the appointment) →
+**Doctor** (see the patient, talk to Atlas). A floating guide on each screen says what to press and has a
+"Sign out, go to the next role" button. The voice front desk (`/frontdesk`) needs no sign-in.
+
+Setup: set `VITE_DEMO_DOCTOR_PASSWORD`, `VITE_DEMO_RECEPTION_PASSWORD` and `VITE_DEMO_PATIENT_PASSWORD` on the
+frontend build, and the same patient password as `DEMO_PATIENT_PASSWORD` on the backend. **Anything in a
+`VITE_*` variable is public**: use only throwaway demo accounts and change the passwords after judging.
+`VITE_DEMO_MODE=false` hides all of it.
+
 ## Voice (Gnani)
 
 | What | Where |

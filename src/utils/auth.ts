@@ -10,7 +10,9 @@ export function getToken(): string | null {
   return localStorage.getItem("vela_token")
 }
 
-export function logout() {
+// `to` is only used when a string is passed: some buttons hand the click event straight to this function.
+export function logout(to: unknown = "/login") {
+  const dest = typeof to === "string" ? to : "/login"
   const token = getToken()
   if (token) {
     // Revokes the token server-side (and marks staff offline), so a copied
@@ -23,7 +25,7 @@ export function logout() {
   }
   localStorage.clear()
   try { sessionStorage.clear() } catch { /* ignore */ }
-  window.location.href = "/login"
+  window.location.href = dest
 }
 
 export function isAuthenticated(): boolean {

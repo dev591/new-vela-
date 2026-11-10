@@ -42,6 +42,12 @@ class Player {
 
 const COPY: Record<string, string> = { 'hi-IN': 'बोलिए', 'hi-en': 'Boliye', 'en-IN': 'Speak' }
 
+// Every line on the kiosk is shown in Hindi first and English under it, so a patient who
+// reads only one of the two can still follow. `lang="hi"` tells screen readers which is which.
+function Bi({ hi, en }: { hi: string; en: string }) {
+  return <><span lang="hi" style={{ display: 'block' }}>{hi}</span><span style={{ display: 'block', fontSize: '0.8em', opacity: 0.75 }}>{en}</span></>
+}
+
 export default function FrontDesk() {
   const [phase, setPhase] = useState<Phase>('idle')
   const [transcript, setTranscript] = useState('')
@@ -158,7 +164,9 @@ export default function FrontDesk() {
       <header>
         <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--brand)', letterSpacing: 0.2 }}>VELA Front Desk</div>
         <h1 style={{ fontSize: 34, fontWeight: 700, margin: '8px 0 4px' }}>
-          {phase === 'done' && ticket ? 'You are checked in' : 'Tap the mic and tell us why you are here'}
+          {phase === 'done' && ticket
+            ? <Bi hi="आपका चेक-इन हो गया है" en="You are checked in" />
+            : <Bi hi="माइक दबाइए और बताइए कि आप क्यों आए हैं" en="Tap the mic and tell us why you are here" />}
         </h1>
         <p style={{ fontSize: 18, color: 'var(--ink-2, #6e6e73)', margin: 0 }}>
           {Object.values(COPY).join(' · ')} — Hindi, Hinglish or English
@@ -169,7 +177,7 @@ export default function FrontDesk() {
         <div role="alert" style={{ display: 'flex', alignItems: 'center', gap: 10, background: 'var(--danger-light)',
                                    border: '2px solid var(--danger)', color: 'var(--danger)', borderRadius: 16,
                                    padding: '14px 20px', fontSize: 20, fontWeight: 700 }}>
-          <Siren size={26} /> Emergency: our staff are being alerted now
+          <Siren size={26} /> <span><Bi hi="आपातकाल: स्टाफ को अभी बुलाया जा रहा है" en="Emergency: our staff are being alerted now" /></span>
         </div>
       )}
 
@@ -182,10 +190,12 @@ export default function FrontDesk() {
         {busy ? <Loader2 size={64} className="animate-spin" /> : <Mic size={72} />}
       </button>
 
-      <div aria-live="polite" style={{ minHeight: 28, fontSize: 18, color: 'var(--ink-2, #6e6e73)' }}>
-        {phase === 'idle' && 'Ready'}
-        {phase === 'listening' && (listening ? 'Listening… tap again when you are done' : 'Allow the microphone…')}
-        {phase === 'thinking' && 'One moment…'}
+      <div aria-live="polite" style={{ minHeight: 52, fontSize: 18, color: 'var(--ink-2, #6e6e73)' }}>
+        {phase === 'idle' && <Bi hi="तैयार" en="Ready" />}
+        {phase === 'listening' && (listening
+          ? <Bi hi="सुन रही हूँ… बोलने के बाद माइक फिर दबाइए" en="Listening… tap again when you are done" />
+          : <Bi hi="माइक की अनुमति दीजिए…" en="Allow the microphone…" />)}
+        {phase === 'thinking' && <Bi hi="एक पल रुकिए…" en="One moment…" />}
         {phase === 'error' && <span style={{ color: 'var(--danger)' }}>{message}</span>}
       </div>
 
@@ -201,9 +211,11 @@ export default function FrontDesk() {
         <section style={{ background: 'var(--surface-color, #fff)', borderRadius: 24, padding: '24px 40px',
                           boxShadow: 'var(--shadow-md)', border: `2px solid ${accent}` }}>
           <CheckCircle2 size={28} color={accent} />
-          <div style={{ fontSize: 18, color: 'var(--ink-2, #6e6e73)' }}>Your token number</div>
+          <div style={{ fontSize: 18, color: 'var(--ink-2, #6e6e73)' }}><Bi hi="आपका टोकन नंबर" en="Your token number" /></div>
           <div style={{ fontSize: 88, fontWeight: 800, lineHeight: 1, color: accent }}>{ticket.token}</div>
-          <div style={{ fontSize: 18 }}>{emergency ? 'Staff will see you first.' : 'Please take a seat near reception.'}</div>
+          <div style={{ fontSize: 18 }}>{emergency
+            ? <Bi hi="स्टाफ आपको सबसे पहले देखेंगे।" en="Staff will see you first." />
+            : <Bi hi="कृपया रिसेप्शन के पास बैठिए।" en="Please take a seat near reception." />}</div>
           <div style={{ marginTop: 14, display: 'inline-block', padding: 8, background: '#fff', borderRadius: 12, border: '1px solid var(--line, #d2d2d7)' }} aria-label={`QR code for ticket ${ticket.ticket_number}`}>
             <QRCodeSVG value={ticket.ticket_number} size={96} />
           </div>
@@ -214,12 +226,13 @@ export default function FrontDesk() {
       {(phase === 'done' || phase === 'error') && (
         <button onClick={reset} style={{ minHeight: 52, padding: '0 28px', borderRadius: 14, border: '1px solid var(--line, #d2d2d7)',
                                          background: 'var(--surface-color, #fff)', fontSize: 18, fontWeight: 600, cursor: 'pointer' }}>
-          New check-in
+          <span lang="hi">नया चेक-इन</span> · New check-in
         </button>
       )}
 
       <footer style={{ fontSize: 13, color: 'var(--ink-3, #86868b)', maxWidth: 520 }}>
-        This desk only checks you in and alerts staff. It does not give medical advice.
+        <Bi hi="यह डेस्क केवल चेक-इन करता है और स्टाफ को सूचना देता है। यह कोई चिकित्सा सलाह नहीं देता।"
+            en="This desk only checks you in and alerts staff. It does not give medical advice." />
         {debug && timings && <pre style={{ textAlign: 'left', marginTop: 12 }}>{JSON.stringify(timings, null, 1)}</pre>}
       </footer>
     </main>

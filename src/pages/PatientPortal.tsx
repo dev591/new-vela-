@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 import { supabase } from "../utils/supabase";
 import { API_URL } from "../utils/config";
+import { onlyDemoHospital } from "../utils/demo";
 
 /**
  * PATIENT PORTAL
@@ -129,7 +130,7 @@ const PatientPortal = () => {
     try {
       const q = loc ? `?lat=${loc.lat}&lng=${loc.lng}` : "";
       const res = await axios.get(`${API_URL}/api/hospitals/search${q}`);
-      if (res.data?.status === "success") setHospitals(res.data.hospitals || []);
+      if (res.data?.status === "success") setHospitals(onlyDemoHospital(res.data.hospitals || []));
     } catch {
       // A failed lookup must never block the emergency call, which is why the
       // 108 button never depends on this resolving.

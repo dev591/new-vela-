@@ -1,5 +1,6 @@
 import { openGeneratedDocument } from "../utils/documents";
 import { API_URL, POLL_INTERVALS, OVERPASS_MIRRORS } from "../utils/config";
+import { DEMO_MODE, onlyDemoHospital } from "../utils/demo";
 import { Activity, Calendar, Download, FileText, Pill, User, X, MapPin, Mic, CalendarPlus, ChevronRight, Clock, CheckCircle, AlertCircle, CheckCircle2, Upload, Trash2, Phone, LogOut, Pencil } from "lucide-react";
 import { useEffect, useState, useRef } from "react";
 import { useNavigate } from "react-router-dom";
@@ -222,8 +223,8 @@ const PatientDashboard = () => {
     axios.get(`${API_URL}/api/hospitals/search`, { params: lastLoc ? { lat: lastLoc.lat, lng: lastLoc.lng } : {} })
       .then(r => { if (r.data?.status === 'success') writeCache("vela_partner_hospitals", r.data.hospitals); })
       .catch(() => {});
-    axios.get(`${API_URL}/api/network/hospitals`).then(r => { if (r.data?.status === 'success') setNetworkHospitals(r.data.hospitals); }).catch(() => {});
-    axios.get(`${API_URL}/api/network/doctors`).then(r => { if (r.data?.status === 'success') setNetworkDoctors(r.data.doctors); }).catch(() => {});
+    axios.get(`${API_URL}/api/network/hospitals`).then(r => { if (r.data?.status === 'success') setNetworkHospitals(DEMO_MODE ? [] : r.data.hospitals); }).catch(() => {});
+    axios.get(`${API_URL}/api/network/doctors`).then(r => { if (r.data?.status === 'success') setNetworkDoctors(DEMO_MODE ? [] : r.data.doctors); }).catch(() => {});
   }, []);
 
   const fetchActiveAdmission = async (patientId: string) => {
@@ -411,13 +412,13 @@ const PatientDashboard = () => {
 
     // Fetch Vela network hospitals
     axios.get(`${API_URL}/api/network/hospitals`)
-      .then(r => { if (r.data.status === 'success') setNetworkHospitals(r.data.hospitals); })
+      .then(r => { if (r.data.status === 'success') setNetworkHospitals(DEMO_MODE ? [] : r.data.hospitals); })
       .catch(console.error);
 
     // Fetch Vela network solo doctors (verified only — patients never see
     // an unverified license, see plan Phase 3).
     axios.get(`${API_URL}/api/network/doctors`)
-      .then(r => { if (r.data.status === 'success') setNetworkDoctors(r.data.doctors); })
+      .then(r => { if (r.data.status === 'success') setNetworkDoctors(DEMO_MODE ? [] : r.data.doctors); })
       .catch(console.error);
 
     // Load Mapbox map
@@ -705,7 +706,7 @@ const PatientDashboard = () => {
     const byDistance = (a: any, b: any) => a.distance - b.distance;
     const cachedPartners = readCache<any[]>("vela_partner_hospitals", []);
     if (!keyword && cachedPartners.length) {
-      setHospitals(cachedPartners.map(toPartner).filter((h: any) => h.lat && h.lng).sort(byDistance));
+      setHospitals(onlyDemoHospital(cachedPartners).map(toPartner).filter((h: any) => h.lat && h.lng).sort(byDistance));
       setIsSearchingHospitals(false);
     } else {
       setHospitals([]);
@@ -730,13 +731,14 @@ const PatientDashboard = () => {
     const partnerPromise = axios.get(`${API_URL}/api/hospitals/search`, { params: { ...(keyword ? { query: keyword } : {}), ...(loc ? { lat: loc.lat, lng: loc.lng } : {}) } })
       .then(res => {
         if (res.data.status === 'success') {
-          velaPartnerData = res.data.hospitals;
+          velaPartnerData = onlyDemoHospital(res.data.hospitals);
           if (!keyword) writeCache("vela_partner_hospitals", velaPartnerData);
         }
       })
       .catch(e => console.warn("[FindCare] Partner search failed", e));
 
     const osmPromise = (async () => {
+      if (DEMO_MODE) return;   // demo: only the one demo hospital, never real nearby hospitals
       try {
         osmData = await Promise.any(OVERPASS_MIRRORS.map(async (mirror) => {
           const res = await fetch(mirror, { method: "POST", body: osmQuery, signal: AbortSignal.timeout(7000) });
