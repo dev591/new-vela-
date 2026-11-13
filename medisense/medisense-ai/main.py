@@ -14,7 +14,7 @@ import asyncio
 import os, base64, json, fitz, hashlib, requests, re, secrets, string, sqlite3, uuid, time
 from bs4 import BeautifulSoup
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 import pickle, re, random
@@ -1104,6 +1104,45 @@ def verify_audit_log():
     conn.close()
     return {"status": "intact", "checked": checked}
 
+_STAFF_ONLINE_WINDOW_S = 15 * 60
+_STAFF_TOUCH_EVERY_S = 60
+_staff_last_touch: dict = {}
+
+def _staff_is_online(row: dict) -> bool:
+    """A staff member counts as online only if flagged online AND active in the last 15 minutes.
+
+    The flag alone is set at login and cleared only on an explicit logout, so closing a tab or an
+    expired session would leave someone "Online" forever.
+    """
+    if not row.get("online"):
+        return False
+    raw = row.get("last_active")
+    if not raw:
+        return False
+    try:
+        seen = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if seen.tzinfo is None:
+            seen = seen.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - seen).total_seconds() <= _STAFF_ONLINE_WINDOW_S
+    except Exception:
+        return False
+
+def _touch_staff_activity(session: dict) -> None:
+    """Record that this staff member just made an authenticated request (at most once a minute)."""
+    sid = session.get("staff_id")
+    if not sid or session.get("role") in ("patient", "vela_owner"):
+        return
+    now = time.time()
+    if now - _staff_last_touch.get(sid, 0) < _STAFF_TOUCH_EVERY_S:
+        return
+    _staff_last_touch[sid] = now
+    try:
+        supabase_admin.table("vela_staff").update(
+            {"online": True, "last_active": datetime.utcnow().isoformat()}
+        ).eq("id", sid).execute()
+    except Exception:
+        pass  # presence is best-effort
+
 @fastapi_app.middleware("http")
 async def _require_auth(request: _Request, call_next):
     path = request.url.path
@@ -1139,6 +1178,7 @@ async def _require_auth(request: _Request, call_next):
         )
     request.state.session = session
     authz.current_session.set(session)
+    spawn(asyncio.to_thread(_touch_staff_activity, session))
     response = await call_next(request)
     if _is_phi_path(path):
         # Break-glass: a clinician opening a record outside the normal flow
@@ -1893,6 +1933,30 @@ def _supabase_password_ok(email: str, password: str) -> bool:
             print(f"⚠️ patient password check failed: {type(e).__name__}: {e}")
         return False
 
+def _confirm_unconfirmed_patient(email: str) -> bool:
+    """If this email has a Supabase Auth user that never confirmed its email, confirm it. True if it did.
+
+    Patients sign up on the portal with no confirmation step in the app, so with "Confirm email" on in
+    Supabase a brand-new account could never sign in. Confirming here does not skip the password check:
+    the caller re-verifies the password afterwards. Trade-off: email ownership is not proven.
+    """
+    try:
+        page = 1
+        while True:
+            users = supabase_admin.auth.admin.list_users(page=page, per_page=200)
+            for u in users or []:
+                if (u.email or "").lower() == email.lower():
+                    if getattr(u, "email_confirmed_at", None):
+                        return False
+                    supabase_admin.auth.admin.update_user_by_id(u.id, {"email_confirm": True})
+                    return True
+            if not users or len(users) < 200:
+                return False
+            page += 1
+    except Exception as e:
+        print(f"⚠️ confirm patient email failed: {type(e).__name__}")
+        return False
+
 import hmac as _hmac
 DEMO_PATIENT_EMAIL = os.getenv("DEMO_PATIENT_EMAIL", "patient@vela.ai").strip().lower()
 DEMO_PATIENT_PASSWORD = os.getenv("DEMO_PATIENT_PASSWORD", "")
@@ -1917,7 +1981,12 @@ async def patient_login(data: dict):
         if demo:
             return patient_session_payload(demo)
         return {"status": "error", "message": "The demo patient is unavailable. Please try again."}
-    if not await asyncio.to_thread(_supabase_password_ok, email, password):
+    ok = await asyncio.to_thread(_supabase_password_ok, email, password)
+    if not ok and await asyncio.to_thread(_confirm_unconfirmed_patient, email):
+        # Supabase blocks sign-in until the email is confirmed, and Supabase reports that exactly like a
+        # wrong password. We just confirmed this account, so check the password again: it must still be right.
+        ok = await asyncio.to_thread(_supabase_password_ok, email, password)
+    if not ok:
         return {"status": "error", "message": "That email and password don't match."}
     try:
         rows = await asyncio.to_thread(
@@ -5700,7 +5769,7 @@ def get_hospital_overview(hospital_id: str = "VLA-MAIN"):
         total_patients = len(patients_data)
         critical_patients = len([p for p in patients_data if p.get('risk_score', 0) > 70])
         reports_today = len(docs_data)
-        staff_online = len([s for s in staff_data if s.get('online') == True])
+        staff_online = len([s for s in staff_data if _staff_is_online(s)])
         alerts_today = critical_patients * 2
         appointments_today = len(apt_res.data or [])
         
@@ -9293,12 +9362,12 @@ def get_owner_hospitals():
         hospitals = supabase_admin.table("vela_hospitals").select("*").eq("active", True).order("onboarded_at", desc=True).execute()
         result = []
         for h in (hospitals.data or []):
-            staff = supabase_admin.table("vela_staff").select("id, online").eq("hospital_id", h["id"]).eq("active", True).execute()
+            staff = supabase_admin.table("vela_staff").select("id, online, last_active").eq("hospital_id", h["id"]).eq("active", True).execute()
             staff_list = staff.data or []
             result.append({
                 **h,
                 "staff_count": len(staff_list),
-                "active_staff": sum(1 for s in staff_list if s.get("online"))
+                "active_staff": sum(1 for s in staff_list if _staff_is_online(s))
             })
         return {"status": "success", "hospitals": result}
     except Exception as e:
@@ -9309,13 +9378,13 @@ def get_owner_hospitals():
 def get_owner_stats():
     try:
         hospitals = supabase_admin.table("vela_hospitals").select("id").eq("active", True).execute()
-        staff = supabase_admin.table("vela_staff").select("id, online").eq("active", True).execute()
+        staff = supabase_admin.table("vela_staff").select("id, hospital_id, online, last_active").eq("active", True).execute()
         today = datetime.utcnow().strftime("%Y-%m-%d")
         patients_today = supabase_admin.table("patients").select("id").gte("admitted_at", today).execute()
         queries_today = supabase_admin.table("voice_queries").select("id").gte("created_at", today).execute()
         staff_list = staff.data or []
         hospital_ids_with_online = set(
-            s.get("hospital_id") for s in staff_list if s.get("online")
+            s.get("hospital_id") for s in staff_list if _staff_is_online(s)
         )
         return {
             "status": "success",
@@ -9375,7 +9444,10 @@ def add_staff(data: dict):
     slug = hospital.data[0]["hospital_slug"]
     h_name = hospital.data[0].get("name", "Vela Hospital")
 
-    name_slug = _re.sub(r'[^a-z0-9.]', '', name.lower().replace(" ", ".").replace("dr.", "dr"))[:15]
+    name_slug = _re.sub(r'[^a-z0-9.]', '', " ".join(name.lower().split()).replace(" ", ".").replace("dr.", "dr"))
+    # Trim after truncating too: a stray space or the 15-char cut can leave a dot next to the "@",
+    # which is not a valid address ("dev.@...").
+    name_slug = _re.sub(r'\.{2,}', '.', name_slug[:15]).strip(".") or "staff"
     email = f"{name_slug}@{slug}.vela.health"
 
     # Check email collision
@@ -9433,6 +9505,7 @@ def get_staff(hospital_id: str, request: _Request):
     for s in (staff.data or []):
         ward_info = s.get("wards") or {}
         s["ward_name"] = ward_info.get("name", "Floating")
+        s["online"] = _staff_is_online(s)
         r = s.get("role", "")
         if r == "doctor":
             grouped["doctors"].append(s)
@@ -9512,14 +9585,25 @@ async def staff_login(data: dict):
     }
 
 
+def _mark_walkthrough_done(hospital_id):
+    """Mark a hospital's onboarding walkthrough complete, creating the row if it never existed.
+
+    A plain UPDATE saves nothing for a hospital with no vela_walkthrough row (e.g. one created by a
+    script), so the wizard would reappear on every login.
+    """
+    payload = {"completed": True, "completed_at": datetime.utcnow().isoformat()}
+    existing = supabase_admin.table("vela_walkthrough").select("hospital_id").eq("hospital_id", hospital_id).limit(1).execute()
+    if existing.data:
+        supabase_admin.table("vela_walkthrough").update(payload).eq("hospital_id", hospital_id).execute()
+    else:
+        supabase_admin.table("vela_walkthrough").insert({"hospital_id": hospital_id, **payload}).execute()
+
+
 @fastapi_app.post("/api/manager/complete-walkthrough")
 def complete_walkthrough(data: dict):
     data["hospital_id"] = scoped_hospital_id(data.get("hospital_id"))
     hospital_id = data.get("hospital_id")
-    supabase_admin.table("vela_walkthrough").update({
-        "completed": True, 
-        "completed_at": datetime.utcnow().isoformat()
-    }).eq("hospital_id", hospital_id).execute()
+    _mark_walkthrough_done(hospital_id)
     return {"status": "success"}
 
 
@@ -9538,7 +9622,7 @@ def command_center(hospital_id: str):
         
         return {
             "status": "success",
-            "staff_online": [s for s in (staff.data or []) if s.get("online")],
+            "staff_online": [s for s in (staff.data or []) if _staff_is_online(s)],
             "patients_waiting": len([o for o in lab_data if o.get("status") in ["payment_confirmed", "accepted"]]),
             "patients_in_consultation": len([o for o in lab_data if o.get("status") == "accepted"]), # Mock for now or check appointments
             "patients_in_lab": len([o for o in lab_data if o.get("status") == "in_progress"]),
@@ -9564,9 +9648,6 @@ def hospital_setup_complete(data: dict):
     }).eq("id", hospital_id).execute()
     
     # Update walkthrough
-    supabase_admin.table("vela_walkthrough").update({
-        "completed": True,
-        "completed_at": datetime.utcnow().isoformat()
-    }).eq("hospital_id", hospital_id).execute()
-    
+    _mark_walkthrough_done(hospital_id)
+
     return {"status": "success", "message": "Hospital setup finalized"}

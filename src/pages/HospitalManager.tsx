@@ -810,7 +810,7 @@ export default function HospitalManager() {
                             ))}
                           </select>
                           {addStaffForm.role === 'lab_controller' && !wards.some(w => w.type?.toLowerCase().includes('lab')) && (
-                            <p style={{ marginTop: 6, fontSize: 11, color: 'var(--danger)', fontFamily: 'var(--font-sans)' }}>⚠️ No Lab area detected. Add a Lab Ward first to hire controllers.</p>
+                            <p style={{ marginTop: 6, fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-sans)' }}>No Lab ward yet. You can still create this login; add a Lab ward later to assign them to it.</p>
                           )}
                         </div>
 
@@ -819,7 +819,7 @@ export default function HospitalManager() {
                             style={{ flex: 1, background: 'var(--bg-secondary)', border: 'none', borderRadius: 10, padding: '12px', fontFamily: 'var(--font-sans)', fontSize: 14, cursor: 'pointer', color: 'var(--text-secondary)' }}>Cancel</button>
                           <button 
                             type="button" 
-                            disabled={addingStaff || !addStaffForm.name.trim() || (addStaffForm.role === 'lab_controller' && !wards.some(w => w.type?.toLowerCase().includes('lab')))} 
+                            disabled={addingStaff || !addStaffForm.name.trim()} 
                             onClick={async () => {
                             setAddingStaff(true);
                             try {
